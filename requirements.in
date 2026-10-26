@@ -1,0 +1,5 @@
+# Dependencias directas de CoClody (runtime). El lock con versiones exactas y
+# hashes se genera con:  python tools/lock_requirements.py
+python-telegram-bot>=22,<23
+keyring>=25,<26
+PyNaCl>=1.5,<2

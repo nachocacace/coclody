@@ -1,0 +1,32 @@
+# Datos locales: nunca al repo
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+logs/
+*.log
+config.toml
+
+# Secretos (clave privada de firma de releases, etc.)
+.env
+.env.*
+*.key
+*.pem
+signing_key*
+
+# Entornos y caches de Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# PyInstaller
+build/
+dist/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
