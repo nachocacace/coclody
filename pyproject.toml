@@ -1,0 +1,16 @@
+[project]
+name = "coclody"
+version = "0.1.0"
+description = "Orquestador personal de tareas para Claude Code, controlado por Telegram."
+requires-python = ">=3.12"
+# Las dependencias exactas (con hashes) están en requirements.txt.
+dependencies = [
+    "python-telegram-bot>=22,<23",
+    "keyring>=25,<26",
+    "PyNaCl>=1.5,<2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"

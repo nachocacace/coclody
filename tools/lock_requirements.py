@@ -77,10 +77,13 @@ class Locked:
 
 
 def read_roots(path: Path) -> list[Requirement]:
+    """Lee un .in; soporta ``-r otro.in`` (relativo al archivo) para componer locks."""
     roots = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.split("#", 1)[0].strip()
-        if line:
+        if line.startswith("-r "):
+            roots += read_roots(path.parent / line[3:].strip())
+        elif line:
             roots.append(Requirement(line))
     return roots
 

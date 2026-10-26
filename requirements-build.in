@@ -1,0 +1,7 @@
+# Entorno de build y tests: runtime + PyInstaller + pytest. El lock resultante
+# (requirements-build.txt) es un superconjunto de requirements.txt con las
+# mismas versiones, así que el build instala solo ese archivo.
+#   python tools/lock_requirements.py requirements-build.in
+-r requirements.in
+pyinstaller>=6.16,<7
+pytest>=8,<9
