@@ -145,7 +145,10 @@ Para no escribir comandos desde el celular:
 - **Teclado fijo**: **➕ Nueva tarea**, **📋 Ver cola** y **❓ Ayuda**. Viene en cada mensaje del bot que no trae otros botones, así que queda siempre a mano. La primera vez que abrís el bot, Telegram muestra **Iniciar**: tocalo, porque un bot no puede mandarte nada (ni el teclado) antes de que le escribas. Con *Nueva tarea*, el bot te pide el título: escribilo como respuesta a ese mensaje (Telegram abre la respuesta solo). Las líneas debajo del título son la descripción.
 - **En cada tarea**: el mensaje de creación, `/estado` y `/lista` traen **✖ Cancelar** en las tareas activas y **↻ Reintentar** en las que fallaron. El aviso de una tarea fallida también trae **↻ Reintentar**.
 - **Estados**: ⏳ en cola · ⚙️ ejecutando · ❓ esperando respuesta · ✅ terminada · ❌ falló · 🚫 cancelada. Son los mismos en `/lista`, `/estado` y los avisos.
-- **Preguntas de sí o no**: si Claude marca la pregunta como de sí/no, el mensaje trae **Sí** y **No**. Igual podés responder con texto si querés aclarar algo.
+- **Preguntas**: toda pregunta trae **✖ Cancelar** para la tarea que pregunta. Si Claude la marca como de sí o no, trae además **Sí** y **No**. Igual podés responder con texto si querés aclarar algo.
+- Si tocás *Nueva tarea* y CoClody se reinicia antes de que mandes el título, tu respuesta igual crea la tarea.
+- Nada de lo que escribís vos ni de lo que escribe Claude se convierte en link (`README.md`, URLs, `@usuario`, `#etiqueta`, `/comando`): se ve igual, pero no se puede tocar. Los comandos que sugiere el propio bot (`/responder`, `/estado`…) sí se pueden tocar.
+- CoClody nunca te escribe primero, salvo para avisarte de tus tareas.
 
 ## Actualizaciones
 
@@ -170,7 +173,8 @@ Sin internet no pasa nada: sigue funcionando y lo intenta más tarde. Para busca
 | La ventana se abre y se cierra enseguida | Abrilo desde PowerShell para ver el mensaje: `& "$env:USERPROFILE\CoClody\coclody.exe"` |
 | `Falta telegram_bot_token en el llavero` | Corré `& "$env:USERPROFILE\CoClody\coclody.exe" setup` y cargá el token de nuevo. |
 | `no se encontró 'claude' en el PATH` | Claude Code no está instalado o Windows no lo encuentra. Repetí el paso 1 y reiniciá la PC. |
-| El bot no contesta nada | ¿Está abierta la ventana de CoClody? ¿Le escribís desde la misma cuenta de Telegram cuyo chat ID cargaste? Los mensajes de otras cuentas se ignoran a propósito. |
+| La ventana de CoClody dice `El polling de Telegram se detuvo` | CoClody dejó de recibir mensajes (casi siempre porque el token se revocó o cambió). Queda abierto pero en pausa: no empieza tareas nuevas ni manda avisos. Corré `coclody.exe check`, corregí el token con `coclody.exe setup` y volvé a abrir CoClody. |
+| El bot no contesta nada | ¿Está abierta la ventana de CoClody? Fijate si dice `El polling de Telegram se detuvo` (fila anterior). ¿Le escribís desde la misma cuenta de Telegram cuyo chat ID cargaste? Los mensajes de otras cuentas se ignoran a propósito. |
 | No me llegan los avisos | Abrí el chat con tu bot y apretá **Iniciar** (paso 2, punto 5). |
 | Quiero cambiar el token | Corré `coclody.exe setup` (como arriba) y contestá `s` cuando pregunte si querés reemplazarlo. |
 | Quiero cambiar el chat ID o la carpeta | Editá `%LOCALAPPDATA%\CoClody\config.toml` con el Bloc de notas (como en el paso 7). |
@@ -329,8 +333,7 @@ Huecos de tests conocidos (el código existe, pero no hay un test que lo ejercit
 
 Otros:
 
-- **Polling muerto, proceso vivo.** Si el polling termina con error (p. ej. `InvalidToken` porque se revocó el token), python-telegram-bot no para la aplicación. CoClody sigue corriendo sin recibir mensajes hasta que se lo cierra; al cerrarlo, la limpieza sí corre (`run_polling`).
-- **El pedido de título del botón *Nueva tarea* vive en memoria.** Si CoClody se reinicia entre el pedido y la respuesta, la respuesta no crea nada y el bot explica que hay que tocar el botón de nuevo.
+- **Vigilancia del polling con un atributo interno.** Si el polling muere (p. ej. `InvalidToken`), python-telegram-bot no para la aplicación ni lo expone. `polling_failure()` mira la tarea interna `Updater._Updater__polling_task`; si una versión futura la renombra, se registra un aviso ("No se puede vigilar el polling") y un test lo detecta. Al detectarlo, se registra un ERROR una sola vez y el worker y el notificador quedan en pausa hasta reiniciar.
 
 - `questions.tg_chat_id`, `questions.tg_message_id` y `repo.set_question_message()` quedaron sin uso desde la migración v3: las respuestas por reply se resuelven con `notification_deliveries`. Se mantienen para no migrar solo para quitarlas.
 - **Proceso huérfano en macOS/Linux.** Claude Code corre en una sesión propia. Si CoClody muere de golpe o se cierra la Terminal donde corre, Claude y sus procesos siguen sin timeout. Al reiniciar, la tarea se marca como fallida, pero el proceso viejo puede seguir trabajando en la misma carpeta. En Windows no pasa: el Job Object mata el árbol cuando CoClody termina.

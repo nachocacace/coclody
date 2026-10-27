@@ -542,7 +542,7 @@ def test_announce_update_once_per_version(services, status, sent):
     texts = fake.sent()
     if sent:
         assert sorted(m["chat_id"] for m in texts) == [ME, BRO]
-        assert all("0.2.0" in m["text"] for m in texts)
+        assert all("0.2.0" in m["text"].replace("\u2060", "") for m in texts)  # se ve igual, sin autolink
     else:
         assert texts == []
 

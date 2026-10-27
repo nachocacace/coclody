@@ -12,8 +12,6 @@ total (cualquiera de esos chats puede ver, responder y cancelar cualquier tarea)
 from __future__ import annotations
 
 import re
-import threading
-from collections import deque
 
 from coclody.db import DbFactory, repo
 from coclody.db.repo import InvalidTransitionError, Question, RepoError, Task
@@ -99,10 +97,6 @@ class Commands:
     def __init__(self, db: DbFactory, cancels: CancelRegistry):
         self._db = db
         self._cancels = cancels
-        # Mensajes "escribí el título" enviados por el botón Nueva tarea, por chat. Solo en memoria:
-        # después de reiniciar, responder a uno viejo no crea nada (y se explica).
-        self._prompts_lock = threading.Lock()
-        self._task_prompts: dict[int, deque[int]] = {}
 
     def help(self) -> str:
         return HELP
@@ -153,21 +147,18 @@ class Commands:
                 task = repo.create_task(conn, title, description=description or None, created_by=chat_id)
                 task = repo.transition_task(conn, task.id, "queued", expected="pending")
         except RepoError as exc:
-            return f"No pude crear la tarea: {exc}", None
+            return f"No pude crear la tarea: {no_autolink(str(exc))}", None
         return f"Creé la tarea #{task.id}: {task_title(task)}\nQuedó en cola.", task.id
 
     def remember_task_prompt(self, chat_id: int, message_id: int) -> None:
-        with self._prompts_lock:
-            self._task_prompts.setdefault(chat_id, deque(maxlen=MAX_TASK_PROMPTS)).append(message_id)
+        """Guarda el pedido de título en la base: una respuesta sigue valiendo después de reiniciar."""
+        with self._db() as conn:
+            repo.add_task_prompt(conn, chat_id, message_id, keep=MAX_TASK_PROMPTS)
 
     def take_task_prompt(self, chat_id: int, message_id: int) -> bool:
         """True (una sola vez) si ese mensaje es un pedido de título enviado a este chat."""
-        with self._prompts_lock:
-            prompts = self._task_prompts.get(chat_id)
-            if prompts is None or message_id not in prompts:
-                return False
-            prompts.remove(message_id)
-            return True
+        with self._db() as conn:
+            return repo.take_task_prompt(conn, chat_id, message_id)
 
     def status(self, arg: str) -> str:
         task_id = parse_task_id(arg)
@@ -183,21 +174,21 @@ class Commands:
         lines = [
             f"#{task.id} {task_title(task)}",
             f"Estado: {label(task.status)}",
-            f"Carpeta: {task.workdir_rel or '(raíz de trabajo)'}",
+            f"Carpeta: {no_autolink(task.workdir_rel) if task.workdir_rel else '(raíz de trabajo)'}",
             f"Creada: {task.created_at} UTC · actualizada: {task.updated_at} UTC",
         ]
         if task.description:
             lines.append(f"\nDescripción:\n{no_autolink(clip(task.description, 1000))}")
         for q in open_questions:
-            lines.append(f"\nPregunta pendiente:\n{q.question}\n(respondé con /responder {task.id} <texto>)")
+            lines.append(f"\nPregunta pendiente:\n{no_autolink(q.question)}\n(respondé con /responder {task.id} <texto>)")
         if runs:
             last = runs[-1]
             lines.append(f"\nÚltima ejecución ({len(runs)} en total): {last.status}, {last.started_at} UTC")
             if last.summary:
-                lines.append(clip(last.summary, 1500))
+                lines.append(no_autolink(clip(last.summary, 1500)))
         if events:
             lines.append("\nÚltimos eventos:")
-            lines += [f"- {e.created_at} {e.kind}: {clip(e.message, 200)}" for e in events]
+            lines += [f"- {e.created_at} {e.kind}: {no_autolink(clip(e.message, 200))}" for e in events]
         return clip("\n".join(lines))
 
     def answer(self, chat_id: int, text: str) -> str:
@@ -308,7 +299,7 @@ class Commands:
         try:
             repo.answer_question(conn, question.id, text, answered_by=chat_id)
         except RepoError as exc:
-            return f"No pude registrar la respuesta: {exc}"
+            return f"No pude registrar la respuesta: {no_autolink(str(exc))}"
         task = repo.get_task(conn, question.task_id)
         remaining = repo.list_open_questions(conn, task_id=task.id)
         if remaining:

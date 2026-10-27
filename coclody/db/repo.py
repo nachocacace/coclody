@@ -470,6 +470,31 @@ def mark_notified(conn: sqlite3.Connection, event_ids: Iterable[int]) -> int:
     return changed
 
 
+# --- pedidos de título (botón Nueva tarea) ------------------------------------------------
+
+
+def add_task_prompt(conn: sqlite3.Connection, chat_id: int, message_id: int, keep: int = 20) -> None:
+    """Registra un pedido de título enviado a un chat; se conservan los ``keep`` más nuevos por chat."""
+    chat = _int(chat_id, "chat_id", 1, 2**53)
+    message = _int(message_id, "message_id", 1, 2**53)
+    with transaction(conn):
+        conn.execute("INSERT OR IGNORE INTO task_prompts (chat_id, message_id) VALUES (?, ?)", (chat, message))
+        conn.execute(
+            "DELETE FROM task_prompts WHERE chat_id = ? AND message_id NOT IN"
+            " (SELECT message_id FROM task_prompts WHERE chat_id = ? ORDER BY message_id DESC LIMIT ?)",
+            (chat, chat, int(keep)),
+        )
+
+
+def take_task_prompt(conn: sqlite3.Connection, chat_id: int, message_id: int) -> bool:
+    """True (una sola vez) si ese mensaje es un pedido de título pendiente de ese chat."""
+    if type(chat_id) is not int or type(message_id) is not int:
+        return False
+    with transaction(conn):
+        cur = conn.execute("DELETE FROM task_prompts WHERE chat_id = ? AND message_id = ?", (chat_id, message_id))
+        return cur.rowcount == 1
+
+
 def record_delivery(
     conn: sqlite3.Connection,
     event_id: int,

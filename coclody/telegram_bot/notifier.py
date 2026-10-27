@@ -14,8 +14,8 @@ inexistente) ese envío se registra como ``rejected`` y se loguea, para no
 reintentarlo para siempre. Ante errores transitorios (red, rate limit) se
 corta la tanda y se reintenta en la próxima.
 
-Botones: una pregunta de sí/no va con botones Sí/No, y un fallo con el botón
-Reintentar. El resto de los mensajes va sin botones.
+Botones: toda pregunta va con Cancelar (y Sí/No si es de sí o no), un fallo con
+Reintentar, y el resto con el teclado fijo.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 
 from coclody.db import DbFactory, repo
 from coclody.db.repo import Question, Run, Task, TaskEvent
-from coclody.telegram_bot.commands import STATUS_EMOJI, clip, task_title
+from coclody.telegram_bot.commands import STATUS_EMOJI, clip, no_autolink, task_title
 from coclody.telegram_bot.keyboards import MAIN_KEYBOARD, question_buttons, task_buttons
 
 log = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ def format_failed(task: Task, run: Run | None) -> str:
 def format_question(task: Task, question: Question) -> str:
     buttons = "Tocá Sí o No, o respondé con texto: " if question.kind == "yes_no" else "Para responder: "
     return clip(
-        f"{STATUS_EMOJI['waiting_input']} La tarea #{task.id} ({task_title(task)}) necesita un dato:\n\n{question.question}\n\n"
+        f"{STATUS_EMOJI['waiting_input']} La tarea #{task.id} ({task_title(task)}) necesita un dato:\n\n{no_autolink(question.question)}\n\n"
         f"{buttons}mantené apretado este mensaje → Responder, o mandá /responder {task.id} <respuesta>. "
         "Si contestás desde la notificación, Telegram no lo toma como respuesta a este mensaje."
     )
@@ -136,4 +136,4 @@ def _record(db: DbFactory, event_id: int, chat_id: int, part: int, status: str, 
 def _summary(run: Run | None) -> str:
     if run is None or not run.summary:
         return "(sin resumen)"
-    return clip(run.summary, 3500)
+    return no_autolink(clip(run.summary, 3500))

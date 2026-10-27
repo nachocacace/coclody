@@ -23,6 +23,12 @@
   de notificaciones y, si están habilitadas, las actualizaciones. Al parar, se
   cancela la tarea en curso y se espera a que el worker la cierre. Esa limpieza
   corre también si el polling termina con error (``run_polling``).
+- Si el polling muere mientras CoClody sigue abierto (p. ej. InvalidToken
+  porque se revocó el token), python-telegram-bot no para la aplicación. Un
+  vigilante lo detecta, lo registra como ERROR (también en la consola) y deja
+  el proceso en un estado explícito: ``Services.polling_error`` con la causa,
+  y el worker y el notificador en pausa (no empieza tareas que nadie podría
+  cancelar ni responder). CoClody no se cierra solo y no escribe por Telegram.
 """
 
 from __future__ import annotations
@@ -61,7 +67,7 @@ from coclody.config import Config
 from coclody.db import DbFactory
 from coclody.orchestrator.worker import CANCEL_SHUTDOWN, Worker
 from coclody.security import ChatGuard
-from coclody.telegram_bot.commands import Commands, clip, parse_task_id
+from coclody.telegram_bot.commands import Commands, clip, no_autolink, parse_task_id
 from coclody.telegram_bot.keyboards import (
     BOT_COMMANDS,
     BUTTON_HELP,
@@ -83,6 +89,12 @@ WORKER_IDLE_S = 2.0
 NOTIFY_INTERVAL_S = 3.0
 SHUTDOWN_WAIT_S = 30.0
 UPDATE_FIRST_CHECK_S = 60.0
+POLL_WATCH_S = 5.0
+POLLING_DEAD = (
+    "El polling de Telegram se detuvo por un error (%s). CoClody sigue abierto pero NO recibe mensajes "
+    "ni botones; no va a empezar tareas nuevas ni enviar avisos. La tarea en curso, si hay, termina sola. "
+    "Revisá el token con 'coclody check' y reiniciá CoClody."
+)
 _COMMAND_RE = re.compile(r"^/\S+\s*(.*)$", re.DOTALL)
 
 
@@ -98,6 +110,8 @@ class Services:
     stop: asyncio.Event | None = None
     background: list[asyncio.Task] = field(default_factory=list)
     stopped: bool = False
+    # Causa, si el polling murió mientras CoClody seguía abierto (ver _polling_watch_loop).
+    polling_error: str | None = None
     # Telegram fecha los mensajes con resolución de segundos.
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC).replace(microsecond=0))
 
@@ -280,7 +294,7 @@ def _reply_with(fn):
         markup = reply.markup if reply.markup is not None else MAIN_KEYBOARD
         sent = await update.effective_message.reply_text(clip(reply.text), reply_markup=markup)
         if reply.on_sent is not None:
-            reply.on_sent(sent)
+            await asyncio.to_thread(reply.on_sent, sent)  # puede tocar la base
 
     return handler
 
@@ -388,6 +402,7 @@ async def _post_init(app: Application) -> None:
     services.background = [
         asyncio.create_task(_worker_loop(services), name="coclody-worker"),
         asyncio.create_task(_notifier_loop(app, services), name="coclody-notifier"),
+        asyncio.create_task(_polling_watch_loop(app, services), name="coclody-polling-watch"),
     ]
     if services.updater is not None:
         services.background.append(asyncio.create_task(_update_loop(app, services), name="coclody-updater"))
@@ -427,6 +442,9 @@ async def _stop_services(app: Application) -> None:
 
 async def _worker_loop(services: Services) -> None:
     while not services.stop.is_set():
+        if services.polling_error is not None:  # en pausa: nadie podría cancelar ni responder
+            await _sleep_or_stop(services.stop, WORKER_IDLE_S)
+            continue
         try:
             task = await asyncio.to_thread(services.worker.run_next)
         except Exception:
@@ -438,11 +456,54 @@ async def _worker_loop(services: Services) -> None:
 
 async def _notifier_loop(app: Application, services: Services) -> None:
     while not services.stop.is_set():
+        if services.polling_error is not None:  # en pausa: los avisos quedan en la base para el próximo arranque
+            await _sleep_or_stop(services.stop, NOTIFY_INTERVAL_S)
+            continue
         try:
             await flush_notifications(app.bot, services.db, services.config.telegram.allowed_chat_ids)
         except Exception:
             log.exception("Error enviando notificaciones")
         await _sleep_or_stop(services.stop, NOTIFY_INTERVAL_S)
+
+
+async def _polling_watch_loop(app: Application, services: Services) -> None:
+    """Detecta que el polling murió con la aplicación todavía corriendo y lo deja registrado una vez."""
+    warned_unwatchable = False
+    while not services.stop.is_set():
+        failure = polling_failure(app)
+        if failure == _UNWATCHABLE:
+            if not warned_unwatchable:
+                warned_unwatchable = True
+                log.warning("No se puede vigilar el polling con esta versión de python-telegram-bot")
+        elif failure is not None and not services.stop.is_set():
+            services.polling_error = failure
+            log.error(POLLING_DEAD, failure)
+            return
+        await _sleep_or_stop(services.stop, POLL_WATCH_S)
+
+
+_UNWATCHABLE = "<sin vigilancia>"
+
+
+def polling_failure(app: Application) -> str | None:
+    """Causa si la tarea de polling terminó mientras el updater sigue marcado como corriendo.
+
+    python-telegram-bot no lo expone: se mira su tarea interna. Si esa tarea no
+    se encuentra (otra versión de la librería), devuelve ``_UNWATCHABLE`` para
+    que se avise en vez de vigilar en silencio algo que no existe.
+    """
+    updater = app.updater
+    if updater is None or not updater.running:
+        return None  # todavía no arrancó, o se está parando a propósito
+    if not hasattr(updater, "_Updater__polling_task"):
+        return _UNWATCHABLE
+    task = updater._Updater__polling_task
+    if task is None or not task.done():
+        return None
+    if task.cancelled():
+        return "cancelado"
+    exc = task.exception()
+    return f"{type(exc).__name__}: {exc}" if exc is not None else "terminó sin error"
 
 
 async def _update_loop(app: Application, services: Services) -> None:
@@ -465,7 +526,7 @@ async def announce_update(bot, services: Services, result: UpdateResult) -> None
     prefix = "⬆️ " if result.status == "installed" else "ℹ️ "
     for chat_id in sorted(services.config.telegram.allowed_chat_ids):
         try:
-            await bot.send_message(chat_id=chat_id, text=prefix + result.message, reply_markup=MAIN_KEYBOARD)
+            await bot.send_message(chat_id=chat_id, text=prefix + no_autolink(result.message), reply_markup=MAIN_KEYBOARD)
         except Exception as exc:
             log.warning("No se pudo avisar la actualización al chat %s: %s", chat_id, exc)
 

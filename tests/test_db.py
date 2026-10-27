@@ -536,3 +536,21 @@ def test_question_kind_is_validated(conn):
         repo.ask_question(conn, t.id, "¿Sigo?", kind="multiple")
     with pytest.raises(sqlite3.IntegrityError):  # la base también lo impide
         conn.execute("INSERT INTO questions (task_id, question, kind) VALUES (?, 'q', 'otra')", (t.id,))
+
+
+def test_migration_v5_adds_task_prompts_to_a_v4_base(app_paths):
+    from coclody.db import migrations
+
+    c = connect(app_paths.db_file)
+    with transaction(c):
+        for script in migrations.MIGRATIONS[:4]:
+            for statement in migrations._split(script):
+                c.execute(statement)
+        c.execute("PRAGMA user_version = 4")
+    c.execute("INSERT INTO tasks (title) VALUES ('vieja')")
+    assert migrate(c) == SCHEMA_VERSION
+    repo.add_task_prompt(c, 1, 2)
+    assert repo.take_task_prompt(c, 1, 2) and repo.get_task(c, 1).title == "vieja"
+    with pytest.raises(sqlite3.IntegrityError):
+        c.execute("INSERT INTO task_prompts (chat_id, message_id) VALUES (0, 1)")
+    c.close()

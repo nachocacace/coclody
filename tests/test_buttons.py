@@ -291,7 +291,7 @@ def test_list_and_status_offer_buttons_per_task(env):
 def test_yes_no_question_end_to_end(env):
     async def scenario():
         params, message = await ask_yes_no(env)
-        assert inline_data(params) == ["q:1:s", "q:1:n"]
+        assert inline_data(params) == ["q:1:s", "q:1:n", "t:c:1"]
         assert "Tocá Sí o No" in params["text"]
         pressed = await env.process(callback_update(ME, "q:1:s", message=message))
         again = await env.process(callback_update(ME, "q:1:n", message=message))
@@ -342,7 +342,7 @@ def test_open_question_has_no_yes_no_buttons(env):
         return params
 
     params = run(scenario())
-    assert inline_data(params) == [] and "Tocá Sí o No" not in params["text"]
+    assert inline_data(params) == ["t:c:1"] and "Tocá Sí o No" not in params["text"]  # solo Cancelar
     assert repo.list_questions(env.conn, 1)[0].kind == "open"
 
 
@@ -448,3 +448,68 @@ def test_keyboard_label_sent_as_reply_to_a_question_is_not_an_answer(env):
     (reply,) = run(scenario())
     assert "❓ #1 limpiar · esperando respuesta" in reply
     assert repo.list_questions(env.conn, 1)[0].status == "open"
+
+
+@pytest.mark.parametrize("marker", [YES_NO_MARKER, QUESTION_MARKER])
+def test_cancel_button_on_a_question_cancels_the_waiting_task(env, marker):
+    env.runner.first = f"Necesito un dato.\n{marker} ¿Sigo?"
+
+    async def scenario():
+        params, message = await ask_yes_no(env)
+        assert inline_data(params)[-1] == "t:c:1"
+        cancelled = await env.process(callback_update(ME, "t:c:1", message=message))
+        late_answer = await env.process(user_text(ME, "sí", reply_to=message))
+        await env.app.shutdown()
+        return texts(cancelled), texts(late_answer)
+
+    cancelled, late_answer = run(scenario())
+    assert cancelled == ["Cancelé la tarea #1."]
+    assert late_answer == ["Esa pregunta ya no está pendiente."]
+    assert repo.get_task(env.conn, 1).status == "cancelled"
+    assert repo.list_questions(env.conn, 1)[0].status == "expired"
+
+
+# --- pedido de título guardado en la base ------------------------------------------------------------
+
+
+def test_title_prompt_survives_a_restart(env):
+    async def ask():
+        await env.app.initialize()
+        calls = await env.process(user_text(ME, BUTTON_NEW))
+        (params,) = [p for n, p in calls if n == "sendMessage"]
+        await env.app.shutdown()  # CoClody se cierra con el pedido pendiente
+        return bot_message(env.fake.returned_ids[-1], ME, params["text"])
+
+    prompt = run(ask())
+
+    # Otro proceso: Services, Commands y aplicación nuevos sobre la misma base.
+    s = env.services
+    restarted = Services(config=s.config, db=env.db, worker=s.worker, guard=ChatGuard({ME}))
+    fake = FakeTelegram()
+    app = build_application(TOKEN, restarted, request=fake, get_updates_request=FakeTelegram())
+
+    async def answer():
+        await app.initialize()
+        await app.process_update(Update.de_json(user_text(ME, "Después del reinicio", reply_to=prompt), app.bot))
+        await app.shutdown()
+        return [p["text"] for p in fake.sent()]
+
+    (reply,) = run(answer())
+    assert reply.startswith("Creé la tarea #1: Después del reinicio")
+    assert env.conn.execute("SELECT count(*) FROM task_prompts").fetchone()[0] == 0  # se consumió
+
+
+def test_task_prompts_repo(env):
+    conn = env.conn
+    for message_id in range(1, 26):
+        repo.add_task_prompt(conn, ME, message_id, keep=20)
+    repo.add_task_prompt(conn, BRO, 3)
+    kept = [r[0] for r in conn.execute("SELECT message_id FROM task_prompts WHERE chat_id = ? ORDER BY 1", (ME,))]
+    assert kept == list(range(6, 26))  # quedan los 20 más nuevos
+    assert repo.take_task_prompt(conn, ME, 1) is False  # recortado
+    assert repo.take_task_prompt(conn, ME, 25) is True
+    assert repo.take_task_prompt(conn, ME, 25) is False  # una sola vez
+    assert repo.take_task_prompt(conn, ME, 3) is False and repo.take_task_prompt(conn, BRO, 3) is True  # por chat
+    assert repo.take_task_prompt(conn, "1", 6) is False and repo.take_task_prompt(conn, ME, True) is False
+    with pytest.raises(repo.ValidationError):
+        repo.add_task_prompt(conn, -5, 1)

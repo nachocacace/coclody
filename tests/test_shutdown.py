@@ -12,6 +12,7 @@ Acá corre el run_polling de verdad contra el cliente simulado: el worker está 
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import threading
 import time
@@ -135,3 +136,93 @@ def test_normal_stop_cleans_up_once(setup, monkeypatch):
     assert calls.count(True) == 1
     # Al arrancar (post_init) se registró el menú de comandos del chat autorizado.
     assert [p["scope"] for p in api.called("setMyCommands")] == [{"type": "chat", "chat_id": ME}]
+
+
+# --- el polling muere y CoClody sigue abierto ------------------------------------------------------
+
+
+class QuickClaude:
+    def __init__(self):
+        self.started = threading.Event()
+        self.runs = 0
+
+    def __call__(self, inv, cancel):
+        self.started.set()
+        self.runs += 1
+        return ClaudeResult(status="ok", exit_code=0, session_id=None, result_text="Listo.", summary="Listo.",
+                            stdout_truncated=False, duration_s=0.1)
+
+
+class DeadPolling(FakeTelegram):
+    """getUpdates siempre responde 401 (token revocado). No para la app: eso lo decide el test."""
+
+    async def do_request(self, url, method, request_data=None, **kw):
+        if url.endswith("/getUpdates"):
+            return 401, b'{"ok": false, "error_code": 401, "description": "Unauthorized"}'
+        return await super().do_request(url, method, request_data, **kw)
+
+
+def test_dead_polling_is_reported_and_leaves_a_clear_paused_state(setup, monkeypatch, caplog):
+    services, _, conn = setup
+    for name in ("POLL_WATCH_S", "WORKER_IDLE_S", "NOTIFY_INTERVAL_S"):
+        monkeypatch.setattr(app_module, name, 0.05)
+    claude = QuickClaude()
+    services.worker.runner = claude
+    api = FakeTelegram()
+    application = build_application(TOKEN, services, request=api, get_updates_request=DeadPolling())
+    seen = {}
+
+    def observer(loop_holder):
+        # Espera a que el vigilante marque el polling como muerto, encola trabajo nuevo y mira que no avance.
+        deadline = time.monotonic() + 10
+        while services.polling_error is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        seen["error"] = services.polling_error
+        seen["sends_before"], seen["runs_before"] = len(api.sent()), claude.runs
+        with services.db() as c:  # conexión propia del hilo
+            t = repo.create_task(c, "nueva después de morir", created_by=ME)
+            repo.transition_task(c, t.id, "queued")
+        time.sleep(0.5)  # varias vueltas del worker y del notificador
+        with services.db() as c:
+            seen["new_status"] = repo.get_task(c, t.id).status
+        seen["sends_after"] = len(api.sent())
+        seen["runs"] = claude.runs
+        loop_holder[0].call_soon_threadsafe(application.stop_running)
+
+    holder = []
+    original_post_init = application.post_init
+
+    async def post_init(app):
+        holder.append(asyncio.get_running_loop())
+        threading.Thread(target=observer, args=(holder,), daemon=True).start()
+        await original_post_init(app)
+
+    application.post_init = post_init
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(InvalidToken):
+            app_module.run_polling(application)
+
+    assert seen["error"] == "InvalidToken: Unauthorized"
+    assert seen["new_status"] == "queued" and seen["runs"] == seen["runs_before"]  # no empezó nada nuevo
+    assert seen["sends_after"] == seen["sends_before"]  # el notificador quedó en pausa
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR and "El polling de Telegram se detuvo" in r.getMessage()]
+    assert len(errors) == 1  # una sola vez, no en cada vuelta
+    message = errors[0].getMessage()
+    assert "NO recibe mensajes" in message and "coclody check" in message and "reiniciá" in message
+    assert not any(m["text"].startswith("El polling") for m in api.sent())  # CoClody no escribe primero
+
+
+def test_watchdog_does_not_fire_on_a_normal_stop(setup):
+    services, claude, conn = setup
+    application, api = start(services, claude, 200)
+    app_module.run_polling(application)
+    assert services.polling_error is None
+
+
+def test_watchdog_warns_if_it_cannot_see_the_polling_task(monkeypatch):
+    from types import SimpleNamespace
+
+    fake_app = SimpleNamespace(updater=SimpleNamespace(running=True))
+    assert app_module.polling_failure(fake_app) == app_module._UNWATCHABLE
+    fake_app.updater.running = False
+    assert app_module.polling_failure(fake_app) is None

@@ -116,8 +116,19 @@ _V4 = """
 ALTER TABLE questions ADD COLUMN kind TEXT NOT NULL DEFAULT 'open' CHECK (kind IN ('open', 'yes_no'));
 """
 
+# v5: pedidos de título del botón "Nueva tarea" que esperan respuesta. Se
+# guardan para que una respuesta siga valiendo después de reiniciar CoClody.
+_V5 = """
+CREATE TABLE task_prompts (
+    chat_id    INTEGER NOT NULL CHECK (chat_id > 0),
+    message_id INTEGER NOT NULL CHECK (message_id > 0),
+    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (chat_id, message_id)
+) STRICT;
+"""
+
 # Orden estricto: la migración N lleva la base de user_version N-1 a N.
-MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4)
+MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4, _V5)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

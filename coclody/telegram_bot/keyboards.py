@@ -83,12 +83,13 @@ def task_buttons(actions: list[tuple[int, str]], *, with_id: bool = False) -> In
     return InlineKeyboardMarkup(rows) if rows else None
 
 
-def question_buttons(question: Question) -> InlineKeyboardMarkup | None:
-    if question.kind != "yes_no":
-        return None
-    return InlineKeyboardMarkup(
-        [[
+def question_buttons(question: Question) -> InlineKeyboardMarkup:
+    """Sí/No si la pregunta es de sí o no, y siempre Cancelar para la tarea que pregunta."""
+    rows = []
+    if question.kind == "yes_no":
+        rows.append([
             InlineKeyboardButton("Sí", callback_data=f"q:{question.id}:s"),
             InlineKeyboardButton("No", callback_data=f"q:{question.id}:n"),
-        ]]
-    )
+        ])
+    rows.append([InlineKeyboardButton(_ACTION_LABELS["cancel"], callback_data=f"t:c:{question.task_id}")])
+    return InlineKeyboardMarkup(rows)

@@ -269,3 +269,61 @@ def test_titles_are_escaped_everywhere_but_stored_as_is(env):
     assert len(texts) == 4 and all(escaped in t for t in texts)
     assert not any("README.md" in t for t in texts), [t for t in texts if "README.md" in t]
     assert repo.get_task(conn, 1).title == "Actualizar README.md"  # la base guarda el original
+
+
+# --- ningún autolink en ninguna parte del chat --------------------------------------------------------
+
+# Aproximación a lo que Telegram linkea solo: dominios, URLs, menciones, hashtags con letras,
+# cashtags y comandos. "#12" (número de tarea) no es hashtag para Telegram: lleva letras.
+REAL_LINK = re.compile(r"[\w-]\.[A-Za-z]{2,}|://|@\w|#\w*[^\W\d]|\$[A-Z]{3,8}|(?<![\w/])/\w")
+# Los comandos que el propio bot sugiere ("mandá /responder 3 …") se dejan tocables a propósito.
+OWN_COMMANDS = re.compile(r"(?<![\w/])/(?:nueva|lista|estado|responder|cancelar|reintentar|ayuda|start)\b")
+LINKY = "README.md, https://example.com/x, @juan, #urgente, $USD y /borrar_todo"
+
+
+def test_no_text_from_claude_or_the_user_is_linkable_anywhere(env):
+    services, db, conn, fake, app = env
+    done = finished(conn, f"Hecha {LINKY}", "done")
+    repo.add_event(conn, done.id, "progress", f"Avance: edité {LINKY}")
+    conn.execute("UPDATE runs SET summary = ? WHERE task_id = ?", (f"Resumen: {LINKY}", done.id))
+    failed = finished(conn, f"Rota {LINKY}", "failed")
+    conn.execute("UPDATE runs SET summary = ? WHERE task_id = ?", (f"Error: {LINKY}", failed.id))
+    waiting = task_in(conn, "Pregunta", "running")
+    repo.ask_question(conn, waiting.id, f"¿Toco {LINKY}?", kind="yes_no")
+    repo.transition_task(conn, waiting.id, "waiting_input")
+    conn.execute("UPDATE tasks SET workdir_rel = 'web.app' WHERE id = ?", (done.id,))
+
+    async def scenario():
+        await app.initialize()
+        await flush_notifications(app.bot, db, {ME})
+        for text in ("/lista", f"/estado {done.id}", f"/estado {failed.id}", f"/estado {waiting.id}",
+                     f"/nueva Nueva {LINKY}\nDescripción {LINKY}", "/estado 4", "/nueva " + "x" * 300):
+            await process(app, fake, user_text(ME, text))
+        await announce_update(app.bot, services, UpdateResult("available", f"Versión 1.2.3 en {LINKY}", "1.2.3"))
+        await app.shutdown()
+        return [p["text"] for p in fake.sent()]
+
+    texts = run(scenario())
+    assert len(texts) >= 10
+    offenders = [(m.group(0), t[:60]) for t in texts for m in REAL_LINK.finditer(OWN_COMMANDS.sub("", t))]
+    assert offenders == []
+    joined = "\n".join(texts).replace(WORD_JOINER, "")
+    for piece in ("Resumen: ", "Error: ", "Avance: edité ", "¿Toco ", "Descripción ", "web.app"):
+        assert piece in joined  # el contenido sí llegó (y se ve igual), solo que sin links
+
+
+def test_coclody_never_writes_first(env):
+    """Al arrancar no se manda ningún mensaje: solo se registra el menú. Solo escriben los avisos de tareas."""
+    services, db, conn, fake, app = env
+    from coclody.telegram_bot import app as app_module
+
+    async def scenario():
+        await app.initialize()
+        await app_module._post_init(app)  # arranque real de los bucles, sin tareas ni avisos pendientes
+        await asyncio.sleep(0.2)
+        await app_module._stop_services(app)
+        await app.shutdown()
+
+    run(scenario())
+    assert fake.sent() == []
+    assert {name for name, _ in fake.calls} <= {"getMe", "setMyCommands", "setChatMenuButton"}
