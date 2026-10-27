@@ -136,3 +136,50 @@ def test_pause_only_for_frozen_windows_double_click(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     assert cli._finish(3, bare=False) == 3 and asked == []
     assert cli._finish(3, bare=True) == 3 and len(asked) == 1
+
+
+# --- update ---------------------------------------------------------------------------
+
+
+class StubUpdater:
+    def __init__(self, status, message="msg"):
+        from coclody.updater.client import UpdateResult
+
+        self.result = UpdateResult(status, message, "0.2.0")
+
+    def check(self):
+        return self.result
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [("up_to_date", 0), ("available", 0), ("installed", 0), ("offline", 1), ("error", 2), ("disabled", 2)],
+)
+def test_update_exit_codes(app_paths, ws, status, code):
+    app_paths.config_file.write_text(
+        render_config(1, str(ws)).replace('# github_repo = ""', 'github_repo = "nacho/coclody"'), encoding="utf-8"
+    )
+    lines = []
+    seen = []
+
+    def factory(repo, updates_dir):
+        seen.append((repo, updates_dir))
+        return StubUpdater(status, f"resultado {status}")
+
+    assert cli.update(app_paths, out=lines.append, updater_factory=factory) == code
+    assert lines == [f"resultado {status}"]
+    assert seen == [("nacho/coclody", app_paths.updates_dir)]
+
+
+def test_update_needs_repo(app_paths, ws):
+    app_paths.config_file.write_text(render_config(1, str(ws)), encoding="utf-8")
+    lines = []
+    assert cli.update(app_paths, out=lines.append) == 2
+    assert "github_repo" in lines[0]
+
+
+def test_check_reports_missing_release_key(app_paths, store, ws, exe):
+    app_paths.config_file.write_text(render_config(1, str(ws)), encoding="utf-8")
+    store.set(SecretName.TELEGRAM_BOT_TOKEN, TOKEN)
+    code, text = run_check(app_paths, store)
+    assert code == 0 and "[aviso] Sin clave pública de releases" in text

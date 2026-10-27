@@ -6,12 +6,16 @@
 # - El punto de entrada (run_coclody.py) está fuera del paquete; ver su docstring.
 # - Los backends de keyring se importan dentro de una función según la
 #   plataforma; se declaran explícitamente para no depender del análisis.
+# - _cffi_backend lo importa desde C la extensión _sodium de PyNaCl, así que el
+#   análisis estático no lo ve: sin declararlo, el ejecutable no arranca.
 # - Sin UPX: comprimir el binario aumenta los falsos positivos de antivirus.
 # - No se empaqueta ningún archivo de datos propio: el SQL vive en el código.
 
 import sys
 
-hidden = ["keyring.backends.macOS"] if sys.platform == "darwin" else []
+hidden = ["_cffi_backend"]
+if sys.platform == "darwin":
+    hidden.append("keyring.backends.macOS")
 if sys.platform == "win32":
     hidden.append("keyring.backends.Windows")
 

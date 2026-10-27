@@ -8,9 +8,9 @@
   anterior al arranque: un comando de hace horas nunca dispara una tarea.
 - Los mensajes se envían como texto plano (sin parse_mode): el contenido de
   una tarea nunca se interpreta como Markdown/HTML.
-- En segundo plano corren dos bucles: el worker (una tarea a la vez, en un
-  hilo) y el envío de notificaciones. Al parar, se cancela la tarea en curso
-  y se espera a que el worker la cierre.
+- En segundo plano corren el worker (una tarea a la vez, en un hilo), el envío
+  de notificaciones y, si están habilitadas, las actualizaciones. Al parar, se
+  cancela la tarea en curso y se espera a que el worker la cierre.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from coclody.orchestrator.worker import CANCEL_SHUTDOWN, Worker
 from coclody.security import ChatGuard
 from coclody.telegram_bot.commands import Commands, clip
 from coclody.telegram_bot.notifier import flush_notifications
+from coclody.updater.client import Updater, UpdateResult
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ ALLOWED_UPDATES = ["message"]
 WORKER_IDLE_S = 2.0
 NOTIFY_INTERVAL_S = 3.0
 SHUTDOWN_WAIT_S = 30.0
+UPDATE_FIRST_CHECK_S = 60.0
 _COMMAND_RE = re.compile(r"^/\S+\s*(.*)$", re.DOTALL)
 
 
@@ -57,6 +59,8 @@ class Services:
     worker: Worker
     guard: ChatGuard
     commands: Commands = field(init=False)
+    updater: Updater | None = None
+    announced_versions: set[str] = field(default_factory=set)
     stop: asyncio.Event | None = None
     background: list[asyncio.Task] = field(default_factory=list)
     # Telegram fecha los mensajes con resolución de segundos.
@@ -159,6 +163,8 @@ async def _post_init(app: Application) -> None:
         asyncio.create_task(_worker_loop(services), name="coclody-worker"),
         asyncio.create_task(_notifier_loop(app, services), name="coclody-notifier"),
     ]
+    if services.updater is not None:
+        services.background.append(asyncio.create_task(_update_loop(app, services), name="coclody-updater"))
 
 
 async def _post_stop(app: Application) -> None:
@@ -194,6 +200,31 @@ async def _notifier_loop(app: Application, services: Services) -> None:
         except Exception:
             log.exception("Error enviando notificaciones")
         await _sleep_or_stop(services.stop, NOTIFY_INTERVAL_S)
+
+
+async def _update_loop(app: Application, services: Services) -> None:
+    interval = services.config.updates.check_interval_hours * 3600
+    await _sleep_or_stop(services.stop, UPDATE_FIRST_CHECK_S)
+    while not services.stop.is_set():
+        try:
+            result = await asyncio.to_thread(services.updater.check)
+            await announce_update(app.bot, services, result)
+        except Exception:
+            log.exception("Error buscando actualizaciones")
+        await _sleep_or_stop(services.stop, interval)
+
+
+async def announce_update(bot, services: Services, result: UpdateResult) -> None:
+    """Avisa por Telegram una sola vez por versión instalada o disponible."""
+    if result.status not in ("installed", "available") or result.version in services.announced_versions:
+        return
+    services.announced_versions.add(result.version)
+    prefix = "⬆️ " if result.status == "installed" else "ℹ️ "
+    for chat_id in sorted(services.config.telegram.allowed_chat_ids):
+        try:
+            await bot.send_message(chat_id=chat_id, text=prefix + result.message)
+        except Exception as exc:
+            log.warning("No se pudo avisar la actualización al chat %s: %s", chat_id, exc)
 
 
 async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> None:

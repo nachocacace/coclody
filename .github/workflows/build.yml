@@ -1,11 +1,15 @@
 # Tests en macOS y Windows, build del ejecutable de Windows y release en borrador.
 #
-# - Python 3.12, el mínimo soportado: el ejecutable se arma con él.
+# - Python 3.12, el mínimo soportado: el ejecutable se arma con él. Parche
+#   exacto por reproducibilidad. 3.12.10 es el último 3.12 con binarios de
+#   Windows y macOS en actions/python-versions (desde 3.12.11 la rama está en
+#   modo solo-seguridad y solo se publica código fuente).
 # - Dependencias solo desde los locks con hashes (--require-hashes, solo wheels).
 # - Actions fijadas por SHA de commit, no por tag (un tag se puede mover).
-# - Un tag v* publica un release EN BORRADOR con el .exe y su SHA-256. La firma
-#   del manifiesto se hace después, localmente, con la clave privada que nunca
-#   está en GitHub; recién ahí se publica el release.
+# - Un tag v* publica un release EN BORRADOR con el .exe, su SHA-256 y el
+#   manifest.json SIN FIRMAR. La firma (manifest.json.sig) se hace después,
+#   localmente, con la clave privada que nunca está en GitHub; recién ahí se
+#   publica el release. La app rechaza cualquier release sin firma válida.
 
 name: build
 
@@ -24,7 +28,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: "3.12"
+  PYTHON_VERSION: "3.12.10"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PYTHONUTF8: "1"
 
@@ -83,8 +87,24 @@ jobs:
           if ($out -notmatch "Falta telegram_bot_token") { throw "check no consultó el llavero" }
           # Sin acentos en el patrón: la salida puede decodificarse con otra página de códigos.
           if ($out -notmatch "Configuraci.n v.lida") { throw "check no validó la config" }
+          # Esta línea solo aparece si PyNaCl (con su _cffi_backend) cargó dentro del ejecutable.
+          if ($out -notmatch "clave p.blica de releases") { throw "PyNaCl no cargó en el ejecutable" }
           # El wrapper de Actions termina con `exit $LASTEXITCODE`: el 2 esperado no debe fallar el paso.
           $global:LASTEXITCODE = 0
+      - name: Manifiesto de versión (sin firmar)
+        shell: pwsh
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (python -c "import coclody; print(coclody.__version__)").Trim()
+          if ($env:REF_TYPE -eq "tag" -and $env:REF_NAME -ne "v$version") {
+            throw "El tag $($env:REF_NAME) no coincide con coclody.__version__ ($version)"
+          }
+          python tools/sign_release.py manifest dist/coclody.exe --version $version --platform windows-x64 --out dist/manifest.json
+          if ($LASTEXITCODE -ne 0) { throw "no se pudo generar el manifiesto" }
+          Get-Content dist/manifest.json
       - name: Calcular SHA-256
         shell: pwsh
         run: |
@@ -97,6 +117,7 @@ jobs:
           path: |
             dist/coclody.exe
             dist/SHA256SUMS.txt
+            dist/manifest.json
           if-no-files-found: error
           retention-days: 14
 
@@ -117,6 +138,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" dist/coclody.exe dist/SHA256SUMS.txt \
+          gh release create "$TAG" dist/coclody.exe dist/SHA256SUMS.txt dist/manifest.json \
             --repo "$GITHUB_REPOSITORY" --draft --title "CoClody $TAG" \
-            --notes "Borrador generado por CI. Antes de publicar: verificar el SHA-256 y adjuntar el manifiesto firmado."
+            --notes "Borrador generado por CI. Para publicar: bajar coclody.exe y manifest.json, firmar con tools/sign_release.py sign, subir manifest.json.sig y recién ahí publicar."

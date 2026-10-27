@@ -1,4 +1,4 @@
-"""Línea de comandos: ``coclody [run|setup|check]``.
+"""Línea de comandos: ``coclody [run|setup|check|update]``.
 
 Sin subcomando: si todavía no hay config.toml corre el setup; si ya hay, arranca
 el bot. Así, en Windows, abrir el ejecutable con doble clic hace lo esperable.
@@ -23,10 +23,11 @@ def main(argv: list[str] | None = None) -> int:
     _safe_console()
     parser = argparse.ArgumentParser(prog="coclody", description="Orquestador de tareas para Claude Code por Telegram.")
     parser.add_argument("--version", action="version", version=f"CoClody {__version__}")
-    sub = parser.add_subparsers(dest="command", metavar="{run,setup,check}")
+    sub = parser.add_subparsers(dest="command", metavar="{run,setup,check,update}")
     sub.add_parser("run", help="arranca el bot (Ctrl+C para salir)")
     sub.add_parser("setup", help="crea la configuración y guarda el token del bot en el llavero")
     sub.add_parser("check", help="verifica configuración, llavero, base y Claude Code sin arrancar el bot")
+    sub.add_parser("update", help="busca una versión nueva firmada y, si corre como ejecutable, la instala")
     args = parser.parse_args(argv)
     bare = args.command is None and argv is None and len(sys.argv) <= 1
 
@@ -46,6 +47,8 @@ def main(argv: list[str] | None = None) -> int:
             code = run_setup(paths, SecretStore())
         elif command == "check":
             code = check(paths, SecretStore())
+        elif command == "update":
+            code = update(paths)
         else:
             from coclody.main import run
 
@@ -88,6 +91,13 @@ def check(paths: AppPaths, store: SecretStore, out=print) -> int:
     else:
         out(f"[ok] Claude Code: {exe}")
 
+    from coclody.updater.pubkey import release_verify_key  # también confirma que PyNaCl carga
+
+    if release_verify_key() is None:
+        out("[aviso] Sin clave pública de releases: las actualizaciones automáticas no instalan nada")
+    else:
+        out("[ok] Clave pública de releases configurada")
+
     if paths.db_file.exists():
         with closing(connect(paths.db_file)) as conn:
             version = current_version(conn)
@@ -99,6 +109,24 @@ def check(paths: AppPaths, store: SecretStore, out=print) -> int:
     else:
         out("[ok] Base de datos: se crea al arrancar")
     return 0 if ok else 2
+
+
+def update(paths: AppPaths, out=print, updater_factory=None) -> int:
+    """Chequeo manual. 0: al día / disponible / instalada; 1: sin red; 2: error o deshabilitado."""
+    from coclody.updater.client import Updater
+
+    try:
+        cfg = load_config(paths)
+    except ConfigError as exc:
+        out(str(exc))
+        return 2
+    if not cfg.updates.github_repo:
+        out("Falta updates.github_repo en la configuración.")
+        return 2
+    factory = updater_factory or (lambda repo, d: Updater(repo, d))
+    result = factory(cfg.updates.github_repo, paths.updates_dir).check()
+    out(result.message)
+    return {"up_to_date": 0, "available": 0, "installed": 0, "offline": 1}.get(result.status, 2)
 
 
 def _safe_console() -> None:

@@ -10,6 +10,7 @@ Los valores nunca se loguean ni aparecen en mensajes de error.
 
 from __future__ import annotations
 
+import base64
 import re
 import sys
 from collections.abc import Callable
@@ -21,13 +22,27 @@ from keyring.errors import KeyringError, PasswordDeleteError
 SERVICE = "coclody"
 
 
+RELEASE_SERVICE = "coclody-release"
+
+
 class SecretName(Enum):
     TELEGRAM_BOT_TOKEN = "telegram_bot_token"
+    # Semilla Ed25519 para firmar releases. Solo la usa tools/sign_release.py,
+    # en la máquina del desarrollador y bajo RELEASE_SERVICE; la app nunca la lee.
+    RELEASE_SIGNING_SEED = "release_signing_seed"
 
 
-# Formato de token de bot de Telegram: "<id numérico>:<35 caracteres aprox.>"
+def _is_seed(value: str) -> bool:
+    try:
+        return len(base64.b64decode(value, validate=True)) == 32
+    except ValueError:
+        return False
+
+
 _VALIDATORS: dict[SecretName, Callable[[str], bool]] = {
+    # Token de bot de Telegram: "<id numérico>:<35 caracteres aprox.>"
     SecretName.TELEGRAM_BOT_TOKEN: re.compile(r"^\d{5,15}:[A-Za-z0-9_-]{30,64}$").fullmatch,
+    SecretName.RELEASE_SIGNING_SEED: _is_seed,
 }
 
 

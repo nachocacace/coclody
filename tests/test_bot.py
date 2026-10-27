@@ -514,3 +514,29 @@ def test_waiting_input_with_two_questions_resumes_partially(conn, db):
     assert notify(db, retry) == 1
     (only,) = retry.sent()
     assert "¿Y el tamaño?" in only["text"]  # la primera pregunta no se repite
+
+
+# --- aviso de actualizaciones ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("status", "sent"), [("installed", True), ("available", True), ("up_to_date", False),
+                                               ("offline", False), ("error", False), ("disabled", False)])
+def test_announce_update_once_per_version(services, status, sent):
+    from coclody.telegram_bot.app import announce_update
+    from coclody.updater.client import UpdateResult
+
+    result = UpdateResult(status, "Se instaló la versión 0.2.0", "0.2.0")
+    fake = FakeTelegram()
+
+    async def go():
+        async with Bot(TOKEN, request=fake) as bot:
+            await announce_update(bot, services, result)
+            await announce_update(bot, services, result)  # segunda vez: no repite
+
+    run(go())
+    texts = fake.sent()
+    if sent:
+        assert sorted(m["chat_id"] for m in texts) == [ME, BRO]
+        assert all("0.2.0" in m["text"] for m in texts)
+    else:
+        assert texts == []
