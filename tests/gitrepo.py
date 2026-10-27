@@ -29,6 +29,9 @@ def sh_git(cwd: Path, *args: str) -> str:
 def make_repo(path: Path, branch: str = "main") -> Path:
     path.mkdir(parents=True, exist_ok=True)
     sh_git(path, "init", "-q", "-b", branch)
+    # Identidad local del repo: los commits de CoClody la usan (en CI no hay identidad global).
+    sh_git(path, "config", "user.name", "Test")
+    sh_git(path, "config", "user.email", "test@example.invalid")
     (path / "README.md").write_text("hola\n", encoding="utf-8")
     sh_git(path, "add", "README.md")
     sh_git(path, "commit", "-q", "-m", "inicio")
