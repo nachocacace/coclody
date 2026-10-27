@@ -200,7 +200,8 @@ def test_env_drops_paid_api_and_coclody_vars(ws, fake_claude):
 
 
 @pytest.mark.parametrize("tool", ["Bash(echo %PATH%)", 'Bash(echo "x")', "Bash(a & b)", "Bash(a | b)", "Bash(a ^ b)", "Bash(a > b)", "Bash(a!)"])
-def test_batch_wrapper_rejects_cmd_metacharacters(ws, tmp_path, tool):
+def test_batch_wrapper_rejects_cmd_metacharacters(ws, tmp_path, tool, monkeypatch):
+    monkeypatch.setattr(claude_runner, "_WINDOWS", True)  # la validación de cmd.exe es solo de Windows
     exe = tmp_path / "npm" / "claude.cmd"
     exe.parent.mkdir()
     exe.write_text("@echo off\r\n")
@@ -209,13 +210,69 @@ def test_batch_wrapper_rejects_cmd_metacharacters(ws, tmp_path, tool):
         build_invocation(cfg(ws, exe, tools=("Read", tool)), "x")
 
 
-def test_batch_wrapper_accepts_safe_arguments(ws, tmp_path):
+def test_batch_wrapper_accepts_safe_arguments(ws, tmp_path, monkeypatch):
+    monkeypatch.setattr(claude_runner, "_WINDOWS", True)
     exe = tmp_path / "npm" / "CLAUDE.CMD"
     exe.parent.mkdir()
     exe.write_text("@echo off\r\n")
     exe.chmod(0o755)
     inv = build_invocation(cfg(ws, exe), "prompt con & | % y \" que va por stdin", resume_session=SESSION)
     assert inv.argv[0] == str(exe.resolve())
+
+
+# --- la extensión no decide nada fuera de Windows ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("windows", "name", "expected"),
+    [
+        (True, "claude.cmd", True), (True, "CLAUDE.BAT", True), (True, "claude.exe", False), (True, "claude", False),
+        (False, "claude.cmd", False), (False, "claude.bat", False), (False, "claude.exe", False), (False, "claude", False),
+    ],
+)
+def test_runs_through_cmd_depends_on_platform(monkeypatch, windows, name, expected):
+    monkeypatch.setattr(claude_runner, "_WINDOWS", windows)
+    assert claude_runner._runs_through_cmd(Path("/x") / name) is expected
+
+
+@pytest.mark.parametrize("name", ["claude.exe", "claude.cmd", "claude.bat"])
+def test_windows_extensions_on_posix_skip_cmd_validation(ws, tmp_path, monkeypatch, name):
+    monkeypatch.setattr(claude_runner, "_WINDOWS", False)
+    exe = tmp_path / "bin" / name
+    exe.parent.mkdir()
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    # "%" lo rechazaría la validación de cmd.exe; en POSIX no corresponde aplicarla.
+    inv = build_invocation(cfg(ws, exe, tools=("Read(./**)", "Bash(echo %PATH%)")), "x")
+    assert inv.argv[0] == str(exe.resolve())
+
+
+posix_only = pytest.mark.skipif(os.name != "posix", reason="symlink y shebang: layout de npm en macOS/Linux")
+
+
+@posix_only
+def test_macos_npm_layout_with_exe_suffix(ws, tmp_path, monkeypatch):
+    """El paquete de npm en macOS: bin/claude es un link a .../bin/claude.exe, un binario nativo (no de Windows)."""
+    real = tmp_path / "npm-global" / "lib" / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
+    real.parent.mkdir(parents=True)
+    real.write_text(f"#!{sys.executable}\n" + FAKE_CLAUDE, encoding="utf-8")
+    real.chmod(0o755)
+    bindir = tmp_path / "npm-global" / "bin"
+    bindir.mkdir()
+    (bindir / "claude").symlink_to(real)
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ok")
+    assert claude_runner._WINDOWS is False
+
+    inv = build_invocation(
+        ClaudeConfig(workspace_root=ws, executable="claude", allowed_tools=("Read(./**)", "Bash(echo %PATH%)"),
+                     timeout_minutes=1),
+        "hola",
+    )
+    assert inv.argv[0] == str(real.resolve())  # se resuelve al .exe y no se lo trata como Windows
+    result = run_claude(inv)
+    assert result.status == "ok"
+    assert report_of(result)["stdin"] == "hola"
 
 
 # --- ejecución con un claude falso --------------------------------------------

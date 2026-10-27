@@ -63,7 +63,8 @@ PLATFORM_SPECIFIC: dict[str, tuple[str, set[str]]] = {
     "ctypes.wintypes": ("pensado para Windows; se importa solo dentro de `if sys.platform == \"win32\"`", {PROCESS}),
     # Métodos de Path con requisitos de plataforma (se detectan por nombre).
     ".symlink_to": ("en Windows requiere privilegios o modo desarrollador",
-                    {"tests/test_sandbox.py", "tests/test_config.py", "tests/test_paths.py"}),
+                    {"tests/test_sandbox.py", "tests/test_config.py", "tests/test_paths.py",
+                     "tests/test_claude_runner.py"}),
 }
 
 

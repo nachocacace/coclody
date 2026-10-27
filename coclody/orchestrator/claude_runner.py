@@ -5,9 +5,11 @@ Defensas contra inyección de argumentos:
   como ``--dangerously-skip-permissions`` es solo texto.
 - Todo lo que sí va en argv sale de la config (validada de nuevo acá) o es
   constante. El session_id para ``--resume`` tiene que ser un UUID.
-- Si el ejecutable es un ``.cmd``/``.bat`` (instalación por npm en Windows),
-  Windows lo corre a través de cmd.exe, que interpreta ``& | < > ^ " %``.
-  Para ese caso cada argumento tiene que pertenecer a un conjunto seguro.
+- En Windows, si el ejecutable es un ``.cmd``/``.bat`` (instalación por npm),
+  se corre a través de cmd.exe, que interpreta ``& | < > ^ " %``. Para ese
+  caso cada argumento tiene que pertenecer a un conjunto seguro. La decisión
+  es por plataforma: en macOS/Linux la extensión no significa nada (el paquete
+  de npm llama ``claude.exe`` al binario nativo Mach-O de macOS).
 
 Defensas contra que Claude Code haga más de lo configurado:
 - ``--tools`` limita las herramientas disponibles a las de ``allowed_tools``,
@@ -43,6 +45,7 @@ STDERR_TAIL_CHARS = 2_000
 _SESSION_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _BATCH_SAFE_RE = re.compile(r"^[A-Za-z0-9 _.,:/\\*()=@+-]*$")
 _ENV_DROP_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_USE_", "COCLODY_")
+_WINDOWS = os.name == "nt"
 
 
 @dataclass(frozen=True)
@@ -102,7 +105,7 @@ def build_invocation(
             raise SandboxError("session_id inválido para --resume")
         argv += ["--resume", resume_session]
 
-    if exe.suffix.lower() in (".cmd", ".bat"):
+    if _runs_through_cmd(exe):
         unsafe = [a for a in argv[1:] if not _BATCH_SAFE_RE.fullmatch(a)]
         if unsafe:
             raise SandboxError(
@@ -168,6 +171,11 @@ def run_claude(inv: Invocation, cancel: threading.Event | None = None) -> Claude
         stdout_truncated=proc.stdout_truncated,
         duration_s=proc.duration_s,
     )
+
+
+def _runs_through_cmd(exe: Path) -> bool:
+    """True si Windows va a correr este ejecutable a través de cmd.exe. Nunca en POSIX."""
+    return _WINDOWS and exe.suffix.lower() in (".cmd", ".bat")
 
 
 def _validate_prompt(prompt: object) -> str:
