@@ -36,6 +36,12 @@ class GitError(Exception):
     pass
 
 
+class _Exit(GitError):
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 @dataclass(frozen=True)
 class WorktreeEntry:
     path: Path
@@ -98,7 +104,44 @@ class Git:
             current[key] = value
         return entries
 
+    def branch_heads(self, repo: Path) -> dict[str, str]:
+        """Rama → commit, de todas las ramas locales del repo."""
+        out = self._run(repo, "for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads")
+        return dict(line.rsplit(" ", 1) for line in out.splitlines() if " " in line)
+
+    def is_ancestor(self, path: Path, older: str, newer: str) -> bool:
+        return self._returncode(path, "merge-base", "--is-ancestor", older, newer) == 0
+
+    def has_changes(self, path: Path) -> bool:
+        return bool(self._run(path, "status", "--porcelain", "--untracked-files=all").strip())
+
+    def numstat(self, path: Path, base: str, head: str) -> tuple[int, int, int]:
+        """(archivos, líneas agregadas, líneas borradas) entre dos commits. Los binarios cuentan como archivo."""
+        out = self._run(path, "diff", "--numstat", "--no-ext-diff", "--no-textconv", "--no-renames", base, head)
+        files = insertions = deletions = 0
+        for line in out.splitlines():
+            added, removed, _ = (line.split("\t", 2) + ["", ""])[:3]
+            files += 1
+            insertions += int(added) if added.isdigit() else 0
+            deletions += int(removed) if removed.isdigit() else 0
+        return files, insertions, deletions
+
     # --- cambios (solo los que CoClody necesita) ---------------------------------------------------------
+
+    def backup_ref(self, path: Path, name: str, sha: str) -> str:
+        """Guarda ``sha`` en refs/coclody/backup/<name>: un reset o rebase posterior no lo pierde."""
+        if not name or any(part in ("", ".", "..") for part in name.split("/")):
+            raise GitError(f"nombre de respaldo inválido: {name!r}")
+        ref = f"refs/coclody/backup/{name}"
+        self._run(path, "check-ref-format", ref)
+        self._run(path, "update-ref", ref, sha)
+        return ref
+
+    def commit_all(self, path: Path, message: str) -> str:
+        """``git add -A`` y commit (sin hooks) en el worktree ``path``. Devuelve el commit nuevo."""
+        self._run(path, "add", "--all", "--", ".")
+        self._run(path, "commit", "--no-verify", "--quiet", "-m", message)
+        return self.head(path)
 
     def add_worktree(self, repo: Path, path: Path, branch: str, base: str | None) -> None:
         """Crea un worktree en ``path``. Con ``base`` crea la rama ``branch`` desde ahí; sin ``base`` la usa."""
@@ -114,6 +157,13 @@ class Git:
         if not isinstance(branch, str) or not branch or branch.startswith("-"):
             raise GitError(f"nombre de rama inválido: {branch!r}")
         self._run(repo, "check-ref-format", "--branch", branch)
+
+    def _returncode(self, cwd: Path, *args: str) -> int:
+        try:
+            self._run(cwd, *args)
+        except _Exit as exc:
+            return exc.code
+        return 0
 
     def _run(self, cwd: Path, *args: str) -> str:
         self._check_hooks_dir()
@@ -142,7 +192,7 @@ class Git:
             raise GitError(f"no se pudo ejecutar git: {exc}") from None
         if proc.returncode != 0:
             detail = proc.stderr[:2000].decode("utf-8", "replace").strip()
-            raise GitError(f"git {args[0]} falló ({proc.returncode}): {detail}")
+            raise _Exit(proc.returncode, f"git {args[0]} falló ({proc.returncode}): {detail}")
         return proc.stdout[:_MAX_OUTPUT].decode("utf-8", "replace")
 
     def _check_hooks_dir(self) -> None:

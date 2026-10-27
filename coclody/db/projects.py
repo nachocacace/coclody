@@ -156,6 +156,21 @@ def set_worker_state(conn: sqlite3.Connection, project_id: int, name: str, state
             raise InvalidTransitionError(f"no existe el worker {name!r} en el proyecto {project_id}")
 
 
+def reset_worker_states(conn: sqlite3.Connection, project_id: int) -> None:
+    """Al arrancar: ningún worker quedó ejecutando (recover ya cerró sus tareas)."""
+    with transaction(conn):
+        conn.execute(
+            "UPDATE workers SET state = 'idle', current_task_id = NULL, updated_at = datetime('now')"
+            " WHERE project_id = ?",
+            (project_id,),
+        )
+
+
+def get_worker(conn: sqlite3.Connection, project_id: int, name: str) -> WorkerRow | None:
+    row = conn.execute("SELECT * FROM workers WHERE project_id = ? AND name = ?", (project_id, name)).fetchone()
+    return WorkerRow(**dict(row)) if row else None
+
+
 def _get(conn: sqlite3.Connection, project_id: int) -> Project:
     row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
     if row is None:

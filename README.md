@@ -243,7 +243,7 @@ Estos son supuestos explícitos del diseño. Si alguno no se cumple en tu caso, 
 
 ## Orquestador (modo v2)
 
-> En construcción, por etapas. Hoy (etapa 1) están los proyectos y los worktrees; los workers en paralelo, el cerebro, los resúmenes y la web llegan en las etapas siguientes. Con `[orquestador] enabled = false` (el default), CoClody funciona exactamente como antes.
+> En construcción, por etapas. Hoy (etapa 2) están los proyectos, los worktrees y los workers en paralelo con sus commits; el cerebro, los resúmenes y la web llegan en las etapas siguientes. Con `[orquestador] enabled = false` (el default), CoClody funciona exactamente como antes.
 
 Un **cerebro** (otra instancia de Claude Code que solo decide) coordina varios **workers** de Claude Code que trabajan en paralelo, cada uno en su propio worktree de git del **proyecto activo**.
 
@@ -269,14 +269,24 @@ Al activar un proyecto, CoClody crea los worktrees que falten, dentro de la carp
 
 Las ramas salen de la rama en la que esté la raíz al registrar el proyecto (la "rama base"). `.coclody/` se agrega a `.git/info/exclude` (local, no versionado). CoClody **nunca borra** un worktree: si bajás `workers`, el que sobra queda en disco y deja de usarse. El merge a tu rama principal lo hacés vos.
 
+### Cómo trabajan los workers
+
+- `/nueva w2 <título>` crea la tarea en el proyecto activo y la pone en la cola de w2. Con `/nueva <título>` (o el botón ➕) el bot te muestra un botón por worker para elegir. Repartir tareas es mecánico: no pasa por el cerebro ni gasta nada.
+- Cada worker toma las tareas de **su** cola, de a una, en paralelo con los demás. `/lista` muestra el worker de cada tarea (`#3 [w2] …`).
+- Claude Code corre con su carpeta de trabajo en el worktree del worker, con las herramientas de archivos acotadas a esa carpeta y, si `worker_commands` tiene algo, `Bash` solo para esos comandos.
+- Al terminar, **CoClody** (no Claude) commitea todo lo que cambió en la rama del worker, sin hooks, con el título de la tarea y el RESUMEN de Claude. El aviso de la tarea dice el commit, cuántos archivos y líneas `+/−`, y avisa si es un **cambio grande** (`big_change_files` / `big_change_lines`).
+- Antes de cada tarea, el HEAD del worker se guarda en `refs/coclody/backup/<worker>/…`: aunque algo reescriba la rama, lo anterior se recupera.
+- Después de cada tarea, CoClody verifica que el worktree siga en su rama, que su HEAD no se haya movido por fuera de CoClody, que ninguna rama que no sea de un worker (`main`, la base, otras) haya cambiado o desaparecido, y que la lista de worktrees sea la misma. Si algo no cierra, la tarea falla con el motivo, y **ese worker se detiene** (no toma más tareas) hasta que revises y reinicies CoClody.
+- Con el orquestador activado no corre el worker de siempre: una tarea vieja sin worker queda en cola sin ejecutarse (cancelala o asignala de nuevo con `/nueva`).
+
 ### Qué está garantizado y cómo
 
 | Garantía | Cómo | Tipo |
 |---|---|---|
 | Un worker no sale de la raíz del proyecto | Los worktrees están dentro de la raíz, y la raíz dentro de `workspace_root` (verificado después de resolver symlinks; `.coclody` no puede ser un symlink) | Por construcción |
-| Un worker no toca el worktree de otro | Su carpeta de trabajo es su worktree y sus herramientas de archivos están acotadas a `./**`; los worktrees son carpetas hermanas, nunca una dentro de otra | Por construcción *(etapa 2)* |
+| Un worker no toca el worktree de otro | Su carpeta de trabajo es su worktree y sus herramientas de archivos están acotadas a `./**` (el aislamiento de `./**` está verificado con Claude Code real solo en macOS); los worktrees son carpetas hermanas, nunca una dentro de otra | Por construcción |
 | Los workers no ejecutan git | git no puede estar en `worker_commands` (la config lo rechaza); los commits los hace CoClody | Por construcción, **salvo** lo de la fila siguiente |
-| Ni push, ni reset, ni rebase, ni borrar ramas o worktrees | Si `worker_commands` está vacío: por construcción (los workers no tienen cómo ejecutar nada). Si tiene comandos (tests, linters, build): esos comandos corren código del proyecto (un `conftest.py`, un script de `package.json`), que un worker puede escribir, y ese código puede ejecutar git. Ahí queda **solo por instrucción**, con mitigaciones: entorno sin credenciales, verificación de invariantes después de cada tarea y ramas de respaldo *(etapa 2)* | Construcción sin comandos; **instrucción** con comandos |
+| Ni push, ni reset, ni rebase, ni borrar ramas o worktrees | Si `worker_commands` está vacío: por construcción (los workers no tienen cómo ejecutar nada). Si tiene comandos (tests, linters, build): esos comandos corren código del proyecto (un `conftest.py`, un script de `package.json`), que un worker puede escribir, y ese código puede ejecutar git. Ahí queda **solo por instrucción**, con mitigaciones: el entorno de Claude no tiene agente SSH, variables con pinta de secreto (`*TOKEN*`, `*SECRET*`, `*PASSWORD*`…) ni la config global o del sistema de git (sin helpers de credenciales), y lleva hooks desactivados y `protocol.allow=never` por variables de entorno; además, CoClody verifica las invariantes después de cada tarea y guarda ramas de respaldo. Código que corra con esos comandos puede saltear cada una de esas mitigaciones | Construcción sin comandos; **instrucción** con comandos |
 | El git de CoClody no ejecuta código del repo | Cada llamada lleva `core.hooksPath` a una carpeta vacía (si tiene algo, no se ejecuta git), `core.fsmonitor=false`, sin paginador, y no hereda variables `GIT_*` | Por construcción |
 | El git de CoClody no habla con un remoto | `protocol.allow=never` en cada llamada | Por construcción |
 | `main` y las ramas protegidas no se tocan | Las ramas de los workers son siempre `coclody/<worker>`; `main`, `master` y la rama base se rechazan | Por construcción |

@@ -36,7 +36,7 @@ PORTABLE = {
     "ctypes.c_ulonglong", "ctypes.c_void_p", "ctypes.c_uint32",
     "shutil.which", "shutil.copyfile", "shutil.rmtree", "shutil.move",
     "platform.machine", "platform.system",
-    "time.monotonic", "time.sleep", "time.time",
+    "time.monotonic", "time.sleep", "time.time", "time.time_ns",
     "stat.S_IMODE",
     "tempfile.TemporaryDirectory",
 }

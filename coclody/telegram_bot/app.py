@@ -68,6 +68,7 @@ from coclody.db import DbFactory
 from coclody.orchestrator import projects as project_ops
 from coclody.orchestrator.gitops import Git, GitError
 from coclody.orchestrator.worker import CANCEL_SHUTDOWN, Worker
+from coclody.paths import AppPaths
 from coclody.security import ChatGuard
 from coclody.telegram_bot.commands import Commands, outgoing, parse_task_id
 from coclody.telegram_bot.keyboards import (
@@ -78,9 +79,11 @@ from coclody.telegram_bot.keyboards import (
     BUTTON_NEW,
     MAIN_KEYBOARD,
     NEW_TASK_PROMPT,
+    AssignAction,
     TaskAction,
     parse_callback,
     task_buttons,
+    worker_buttons,
 )
 from coclody.telegram_bot.notifier import flush_notifications
 from coclody.updater.client import Updater, UpdateResult
@@ -110,6 +113,7 @@ class Services:
     commands: Commands = field(init=False)
     updater: Updater | None = None
     git: Git | None = None  # solo con el orquestador activado
+    app_paths: AppPaths | None = None  # carpetas vacías de hooks y config de git para los workers
     announced_versions: set[str] = field(default_factory=set)
     stop: asyncio.Event | None = None
     background: list[asyncio.Task] = field(default_factory=list)
@@ -158,6 +162,11 @@ def build_application(
         return Reply(c.list_tasks(), task_buttons(c.list_actions(), with_id=True))
 
     def new(chat_id: int, text: str) -> Reply:
+        if services.config.orchestrator.enabled:
+            reply, task_id, choose = c.create_orchestrated_task(chat_id, text)
+            if task_id and choose:
+                return Reply(reply, worker_buttons(task_id, choose))
+            return Reply(reply, task_buttons(c.task_actions(task_id)) if task_id else None)
         reply, task_id = c.create_task(chat_id, text)
         return Reply(reply, task_buttons(c.task_actions(task_id)) if task_id else None)
 
@@ -317,6 +326,9 @@ async def _on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if isinstance(action, TaskAction):
         fn = c.cancel if action.action == "cancel" else c.retry
         text, remove_buttons = await asyncio.to_thread(fn, str(action.task_id)), False
+    elif isinstance(action, AssignAction):
+        text = await asyncio.to_thread(c.assign, action.task_id, action.worker)
+        remove_buttons = text.startswith("La tarea")  # asignada: los otros botones ya no sirven
     else:
         text, remove_buttons = await asyncio.to_thread(
             c.answer_button, chat_id, query.message.message_id, action.question_id, action.answer
@@ -446,8 +458,16 @@ async def _post_init(app: Application) -> None:
     services: Services = app.bot_data["services"]
     await setup_menu(app.bot, services.config.telegram.allowed_chat_ids, services.config.orchestrator.enabled)
     services.stop = asyncio.Event()
+    if services.config.orchestrator.enabled:
+        # Un bucle por worker; el modo de un worker (y su carpeta de trabajo común) no corre.
+        workers = [
+            asyncio.create_task(_pool_loop(services, f"w{i}"), name=f"coclody-worker-w{i}")
+            for i in range(1, services.config.orchestrator.workers + 1)
+        ]
+    else:
+        workers = [asyncio.create_task(_worker_loop(services), name="coclody-worker")]
     services.background = [
-        asyncio.create_task(_worker_loop(services), name="coclody-worker"),
+        *workers,
         asyncio.create_task(_notifier_loop(app, services), name="coclody-notifier"),
         asyncio.create_task(_polling_watch_loop(app, services), name="coclody-polling-watch"),
     ]
@@ -499,6 +519,41 @@ async def _worker_loop(services: Services) -> None:
             task = None
         if task is None:
             await _sleep_or_stop(services.stop, WORKER_IDLE_S)
+
+
+async def _pool_loop(services: Services, name: str) -> None:
+    while not services.stop.is_set():
+        if services.polling_error is not None:  # en pausa, como el worker de siempre
+            await _sleep_or_stop(services.stop, WORKER_IDLE_S)
+            continue
+        try:
+            task = await asyncio.to_thread(run_worker_once, services, name)
+        except Exception:
+            log.exception("Error en el worker %s", name)
+            task = None
+        if task is None:
+            await _sleep_or_stop(services.stop, WORKER_IDLE_S)
+
+
+def run_worker_once(services: Services, name: str):
+    """Corre la próxima tarea del worker ``name`` en el proyecto activo. None si no había o no puede."""
+    from coclody.db import projects as prepo
+    from coclody.orchestrator.pool import WorktreeWorker
+    from coclody.orchestrator.worktrees import WorkerSpec
+
+    if services.git is None or services.app_paths is None:
+        return None
+    with services.db() as conn:
+        project = prepo.active_project(conn)
+        row = prepo.get_worker(conn, project.id, name) if project else None
+    if row is None or row.state in ("error", "paused"):
+        return None
+    worker = WorktreeWorker(
+        services.config, services.db, services.worker.cancels, services.git, project,
+        WorkerSpec(row.name, row.branch, row.path_rel), services.app_paths.git_hooks_dir,
+        services.app_paths.git_empty_config, runner=services.worker.runner,
+    )
+    return worker.run_next()
 
 
 async def _notifier_loop(app: Application, services: Services) -> None:

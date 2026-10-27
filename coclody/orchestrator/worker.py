@@ -114,7 +114,7 @@ class Worker:
     def run_next(self) -> Task | None:
         """Ejecuta la próxima tarea en cola. Devuelve la tarea final o None si no había."""
         with self.db() as conn:
-            task = repo.next_queued_task(conn)
+            task = self._next_task(conn)
             if task is None:
                 return None
             # Se registra antes de pasar a running: una cancelación nunca cae en un hueco.
@@ -126,7 +126,7 @@ class Worker:
                 return None  # la cancelaron o editaron justo ahora
             run = repo.start_run(conn, task.id)
             resume = _last_session(conn, task.id, exclude_run=run.id)
-            prompt = build_prompt(task, repo.list_questions(conn, task.id, status="answered"))
+            prompt = self._prompt(task, repo.list_questions(conn, task.id, status="answered"))
 
         try:
             result = self._execute(task, prompt, resume, cancel)
@@ -135,7 +135,19 @@ class Worker:
             self.cancels.unregister(task.id)
 
         with self.db() as conn:
+            self._before_finish(conn, task, run.id, result)
             return self._finish(conn, task, run.id, result, reason)
+
+    # Puntos de extensión (los redefine el worker de worktree del orquestador).
+
+    def _next_task(self, conn) -> Task | None:
+        return repo.next_queued_task(conn)
+
+    def _prompt(self, task: Task, answered: list[Question]) -> str:
+        return build_prompt(task, answered)
+
+    def _before_finish(self, conn, task: Task, run_id: int, result: ClaudeResult) -> None:
+        pass
 
     def _execute(self, task: Task, prompt: str, resume: str | None, cancel: threading.Event) -> ClaudeResult:
         try:

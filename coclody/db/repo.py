@@ -123,6 +123,7 @@ def create_task(
     priority: int = 0,
     workdir_rel: str | None = None,
     created_by: int | None = None,
+    project_id: int | None = None,
 ) -> Task:
     values = (
         _text(title, "title", 200),
@@ -130,13 +131,39 @@ def create_task(
         _int(priority, "priority", -100, 100),
         normalize_workdir_rel(workdir_rel),
         _opt_id(created_by, "created_by"),
+        _opt_id(project_id, "project_id"),
     )
     with transaction(conn):
         cur = conn.execute(
-            "INSERT INTO tasks (title, description, priority, workdir_rel, created_by) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO tasks (title, description, priority, workdir_rel, created_by, project_id)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
             values,
         )
         return _get(conn, Task, "tasks", cur.lastrowid)
+
+
+def next_queued_task_for(conn: sqlite3.Connection, project_id: int, worker: str) -> Task | None:
+    """Próxima tarea en cola de un worker del orquestador (dispatch mecánico, sin el cerebro)."""
+    row = conn.execute(
+        "SELECT * FROM tasks WHERE status = 'queued' AND project_id = ? AND worker = ?"
+        " ORDER BY priority DESC, id ASC LIMIT 1",
+        (project_id, worker),
+    ).fetchone()
+    return Task(**dict(row)) if row else None
+
+
+def assign_task(conn: sqlite3.Connection, task_id: int, project_id: int, worker: str) -> Task:
+    """Asigna una tarea pendiente de un proyecto a uno de sus workers y la pone en cola."""
+    with transaction(conn):
+        task = _get(conn, Task, "tasks", task_id)
+        if task.project_id != project_id:
+            raise InvalidTransitionError(f"la tarea {task.id} no es del proyecto activo")
+        if task.status != "pending":
+            raise InvalidTransitionError(f"la tarea {task.id} ya no está esperando asignación ({task.status})")
+        if not conn.execute("SELECT 1 FROM workers WHERE project_id = ? AND name = ?", (project_id, worker)).fetchone():
+            raise ValidationError(f"no existe el worker {worker!r} en el proyecto")
+        conn.execute("UPDATE tasks SET worker = ? WHERE id = ?", (worker, task.id))
+        return _transition(conn, task.id, "queued", "pending")  # en la misma transacción que la asignación
 
 
 def get_task(conn: sqlite3.Connection, task_id: int) -> Task | None:
@@ -213,22 +240,27 @@ def transition_task(
     if new_status not in TASK_TRANSITIONS:
         raise ValidationError(f"estado desconocido: {new_status!r}")
     with transaction(conn):
-        task = _get(conn, Task, "tasks", task_id)
-        if expected is not None and task.status != expected:
-            raise InvalidTransitionError(
-                f"la tarea {task.id} está en '{task.status}', se esperaba '{expected}'"
-            )
-        if new_status not in TASK_TRANSITIONS[task.status]:
-            raise InvalidTransitionError(f"la tarea {task.id} no puede pasar de '{task.status}' a '{new_status}'")
-        finished = "datetime('now')" if new_status in TERMINAL_STATUSES else "NULL"
-        conn.execute(
-            f"UPDATE tasks SET status = ?, updated_at = datetime('now'), finished_at = {finished} WHERE id = ?",
-            (new_status, task.id),
+        return _transition(conn, task_id, new_status, expected)
+
+
+def _transition(conn: sqlite3.Connection, task_id: int, new_status: str, expected: str | None) -> Task:
+    """El cambio de estado en sí; quien llama abre la transacción."""
+    task = _get(conn, Task, "tasks", task_id)
+    if expected is not None and task.status != expected:
+        raise InvalidTransitionError(
+            f"la tarea {task.id} está en '{task.status}', se esperaba '{expected}'"
         )
-        _insert_event(
-            conn, task.id, None, "status_change", f"{task.status} → {new_status}", notify=new_status in NOTIFY_STATUSES
-        )
-        return _get(conn, Task, "tasks", task.id)
+    if new_status not in TASK_TRANSITIONS[task.status]:
+        raise InvalidTransitionError(f"la tarea {task.id} no puede pasar de '{task.status}' a '{new_status}'")
+    finished = "datetime('now')" if new_status in TERMINAL_STATUSES else "NULL"
+    conn.execute(
+        f"UPDATE tasks SET status = ?, updated_at = datetime('now'), finished_at = {finished} WHERE id = ?",
+        (new_status, task.id),
+    )
+    _insert_event(
+        conn, task.id, None, "status_change", f"{task.status} → {new_status}", notify=new_status in NOTIFY_STATUSES
+    )
+    return _get(conn, Task, "tasks", task.id)
 
 
 def delete_task(conn: sqlite3.Connection, task_id: int) -> bool:
@@ -500,6 +532,42 @@ def take_task_prompt(conn: sqlite3.Connection, chat_id: int, message_id: int) ->
     with transaction(conn):
         cur = conn.execute("DELETE FROM task_prompts WHERE chat_id = ? AND message_id = ?", (chat_id, message_id))
         return cur.rowcount == 1
+
+
+# --- commits de los workers ---------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TaskCommit:
+    id: int
+    task_id: int
+    run_id: int | None
+    project_id: int
+    worker: str
+    base_sha: str
+    head_sha: str
+    files: int
+    insertions: int
+    deletions: int
+    big_change: int
+    created_at: str
+
+
+def add_task_commit(conn: sqlite3.Connection, task_id: int, run_id: int | None, project_id: int, worker: str,
+                    base_sha: str, head_sha: str, files: int, insertions: int, deletions: int,
+                    big_change: bool) -> TaskCommit:
+    with transaction(conn):
+        cur = conn.execute(
+            "INSERT INTO task_commits (task_id, run_id, project_id, worker, base_sha, head_sha, files, insertions,"
+            " deletions, big_change) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, run_id, project_id, worker, base_sha, head_sha, files, insertions, deletions, int(big_change)),
+        )
+        return _get(conn, TaskCommit, "task_commits", cur.lastrowid)
+
+
+def commit_for_run(conn: sqlite3.Connection, run_id: int) -> TaskCommit | None:
+    row = conn.execute("SELECT * FROM task_commits WHERE run_id = ? ORDER BY id DESC LIMIT 1", (run_id,)).fetchone()
+    return TaskCommit(**dict(row)) if row else None
 
 
 def record_delivery(

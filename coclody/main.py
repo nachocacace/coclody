@@ -50,6 +50,8 @@ def prepare_orchestrator(cfg, paths, db):
             if report.problem:
                 log.error("Worktree %s: %s", report.spec.name, report.problem)
         return git
+    with db() as conn:
+        prepo.reset_worker_states(conn, project.id)  # recover() ya cerró lo que quedó ejecutando
     created = [r.spec.name for r in reports if r.status == "created"]
     log.info("Proyecto activo: %s; worktrees listos%s", project.name, f" (creados: {', '.join(created)})" if created else "")
     return git
@@ -87,7 +89,7 @@ def run() -> int:
         updater = Updater(cfg.updates.github_repo, paths.updates_dir)
     services = Services(
         config=cfg, db=db, worker=worker, guard=ChatGuard(cfg.telegram.allowed_chat_ids), updater=updater,
-        git=prepare_orchestrator(cfg, paths, db),
+        git=prepare_orchestrator(cfg, paths, db), app_paths=paths,
     )
     for warning in tool_warnings(cfg.claude.allowed_tools):
         log.warning("Herramienta ampliada respecto del default: %s", warning)

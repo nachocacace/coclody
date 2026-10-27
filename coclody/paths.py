@@ -62,6 +62,11 @@ class AppPaths:
         """Carpeta vacía que CoClody usa como core.hooksPath: ningún hook de un repo se ejecuta."""
         return self.data_dir / "git-hooks-vacio"
 
+    @property
+    def git_empty_config(self) -> Path:
+        """GIT_CONFIG_GLOBAL de los workers: un archivo que no existe (sin helpers de credenciales)."""
+        return self.data_dir / "git-config-vacio"
+
     @classmethod
     def under(cls, root: Path) -> AppPaths:
         """Todo bajo una misma raíz (tests, o instalaciones portables a futuro)."""

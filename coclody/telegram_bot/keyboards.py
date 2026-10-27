@@ -11,6 +11,7 @@
 
       t:c:<tarea>          cancelar la tarea
       t:r:<tarea>          reintentar la tarea
+      w:<tarea>:<worker>   asignar una tarea pendiente a un worker (orquestador)
       q:<pregunta>:s|n     responder sí o no a una pregunta de sí/no
 
   El ``callback_data`` lo arma el bot, pero vuelve desde Telegram: se trata
@@ -53,6 +54,7 @@ ORCHESTRATOR_COMMANDS = (
 YES, NO = "sí", "no"
 _TASK_RE = re.compile(r"t:([cr]):([1-9][0-9]{0,15})")
 _ANSWER_RE = re.compile(r"q:([1-9][0-9]{0,15}):([sn])")
+_ASSIGN_RE = re.compile(r"w:([1-9][0-9]{0,15}):([a-z0-9][a-z0-9-]{0,15})")
 _ACTION_LABELS = {"cancel": "✖ Cancelar", "retry": "↻ Reintentar"}
 _ACTION_CODES = {"cancel": "c", "retry": "r"}
 
@@ -69,14 +71,28 @@ class AnswerAction:
     answer: str  # YES | NO
 
 
-def parse_callback(data: object) -> TaskAction | AnswerAction | None:
+@dataclass(frozen=True)
+class AssignAction:
+    task_id: int
+    worker: str
+
+
+def parse_callback(data: object) -> TaskAction | AnswerAction | AssignAction | None:
     if not isinstance(data, str):
         return None
     if match := _TASK_RE.fullmatch(data):
         return TaskAction("cancel" if match.group(1) == "c" else "retry", int(match.group(2)))
     if match := _ANSWER_RE.fullmatch(data):
         return AnswerAction(int(match.group(1)), YES if match.group(2) == "s" else NO)
+    if match := _ASSIGN_RE.fullmatch(data):
+        return AssignAction(int(match.group(1)), match.group(2))
     return None
+
+
+def worker_buttons(task_id: int, workers: list[str]) -> InlineKeyboardMarkup:
+    """Un botón por worker para asignar una tarea pendiente (de a tres por fila)."""
+    buttons = [InlineKeyboardButton(name, callback_data=f"w:{task_id}:{name}") for name in workers]
+    return InlineKeyboardMarkup([buttons[i:i + 3] for i in range(0, len(buttons), 3)])
 
 
 def task_buttons(actions: list[tuple[int, str]], *, with_id: bool = False) -> InlineKeyboardMarkup | None:

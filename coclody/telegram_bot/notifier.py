@@ -29,7 +29,7 @@ from telegram import Bot
 from telegram.error import BadRequest, Forbidden, TelegramError
 
 from coclody.db import DbFactory, repo
-from coclody.db.repo import Question, Run, Task, TaskEvent
+from coclody.db.repo import Question, Run, Task, TaskCommit, TaskEvent
 from coclody.telegram_bot.commands import STATUS_EMOJI, clip, no_autolink, outgoing, task_title
 from coclody.telegram_bot.keyboards import MAIN_KEYBOARD, question_buttons, task_buttons
 
@@ -44,16 +44,31 @@ class _Pending:
     last_run: Run | None
     questions: list[Question]
     delivered: set[tuple[int, int]]
+    commit: TaskCommit | None = None
 
 
-def format_done(task: Task, run: Run | None) -> str:
-    return clip(f"{STATUS_EMOJI['done']} Tarea #{task.id} terminada: {task_title(task)}\n\n{_summary(run)}")
-
-
-def format_failed(task: Task, run: Run | None) -> str:
+def format_done(task: Task, run: Run | None, commit: TaskCommit | None = None) -> str:
     return clip(
-        f"{STATUS_EMOJI['failed']} Tarea #{task.id} falló: {task_title(task)}\n\n{_summary(run)}\n\nDetalle: /estado {task.id}"
+        f"{STATUS_EMOJI['done']} Tarea #{task.id} terminada: {task_title(task)}{_commit(commit)}\n\n{_summary(run)}"
     )
+
+
+def format_failed(task: Task, run: Run | None, commit: TaskCommit | None = None) -> str:
+    return clip(
+        f"{STATUS_EMOJI['failed']} Tarea #{task.id} falló: {task_title(task)}{_commit(commit)}\n\n{_summary(run)}"
+        f"\n\nDetalle: /estado {task.id}"
+    )
+
+
+def _commit(commit: TaskCommit | None) -> str:
+    """Línea del commit que hizo CoClody (orquestador), con aviso si es un cambio grande."""
+    if commit is None:
+        return ""
+    line = (f"\nCommit {commit.head_sha[:10]} en coclody/{commit.worker}: {commit.files} archivo(s), "
+            f"+{commit.insertions} −{commit.deletions}")
+    if commit.big_change:
+        line += "\n⚠️ Cambio grande: revisalo con cuidado antes de mergear."
+    return line
 
 
 def format_question(task: Task, question: Question) -> str:
@@ -89,10 +104,10 @@ async def _deliver(bot: Bot, db: DbFactory, item: _Pending, recipients: list[int
     if item.new_status == "waiting_input":
         parts = [(q.id, format_question(item.task, q), question_buttons(q)) for q in item.questions]
     elif item.new_status == "done":
-        parts = [(0, format_done(item.task, item.last_run), None)]
+        parts = [(0, format_done(item.task, item.last_run, item.commit), None)]
     elif item.new_status == "failed":
         retry = task_buttons([(item.task.id, "retry")]) if item.task.status == "failed" else None
-        parts = [(0, format_failed(item.task, item.last_run), retry)]
+        parts = [(0, format_failed(item.task, item.last_run, item.commit), retry)]
     else:
         return
     for part, text, markup in parts:
@@ -117,9 +132,9 @@ def _collect(db: DbFactory, limit: int) -> list[_Pending]:
             runs = repo.list_runs(conn, event.task_id)
             questions = repo.list_open_questions(conn, task_id=event.task_id)
             new_status = event.message.rsplit("→", 1)[-1].strip()
-            out.append(
-                _Pending(event, task, new_status, runs[-1] if runs else None, questions, repo.delivered(conn, event.id))
-            )
+            last = runs[-1] if runs else None
+            commit = repo.commit_for_run(conn, last.id) if last else None
+            out.append(_Pending(event, task, new_status, last, questions, repo.delivered(conn, event.id), commit))
         return out
 
 

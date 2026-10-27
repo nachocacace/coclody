@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 
 from coclody.db import DbFactory, repo
+from coclody.db import projects as prepo
 from coclody.db.repo import InvalidTransitionError, Question, RepoError, Task
 from coclody.orchestrator.worker import CANCEL_USER, CancelRegistry
 
@@ -54,7 +55,7 @@ HELP = """\
 CoClody: tareas para Claude Code.
 
 /lista: tareas activas y las últimas terminadas
-/nueva <título>: crea una tarea y la pone en cola. Las líneas siguientes al título son la descripción.
+/nueva <título>: crea una tarea y la pone en cola. Las líneas siguientes al título son la descripción. Con el orquestador: /nueva [worker] <título>.
 /estado <id>: detalle de una tarea
 /responder <id> <texto>: responde la pregunta pendiente de una tarea. También podés responder directamente al mensaje de la pregunta.
 /cancelar <id>: cancela una tarea
@@ -155,6 +156,46 @@ class Commands:
         except RepoError as exc:
             return f"No pude crear la tarea: {no_autolink(str(exc))}", None
         return f"Creé la tarea #{task.id}: {task_title(task)}\nQuedó en cola.", task.id
+
+    def create_orchestrated_task(self, chat_id: int, text: str) -> tuple[str, int | None, list[str]]:
+        """Orquestador: crea la tarea en el proyecto activo. ``/nueva w2 <título>`` la asigna a w2.
+
+        Sin worker, la tarea queda pendiente y se devuelven los workers para
+        ofrecerlos como botones: asignar es mecánico, no pasa por el cerebro.
+        """
+        head, nl, description = text.strip().partition("\n")
+        with self._db() as conn:
+            project = prepo.active_project(conn)
+            workers = [w.name for w in prepo.list_workers(conn, project.id)] if project else []
+        if project is None:
+            return "No hay proyecto activo: elegí uno con /proyecto <nombre> (o mirá /proyectos).", None, []
+        first, _, rest = head.partition(" ")
+        worker = first if first in workers and rest.strip() else None
+        title = rest if worker else head
+        if not title.strip():
+            return "Uso: /nueva [worker] <título>\n(las líneas siguientes son la descripción, opcional)", None, []
+        try:
+            with self._db() as conn:
+                task = repo.create_task(conn, title, description=description or None, created_by=chat_id,
+                                        project_id=project.id)
+                if worker:
+                    task = repo.assign_task(conn, task.id, project.id, worker)
+        except RepoError as exc:
+            return f"No pude crear la tarea: {exc}", None, []
+        if worker:
+            return f"Creé la tarea #{task.id} para {worker}: {task_title(task)}\nQuedó en cola.", task.id, []
+        return f"Creé la tarea #{task.id}: {task_title(task)}\n¿Qué worker la hace?", task.id, workers
+
+    def assign(self, task_id: int, worker: str) -> str:
+        with self._db() as conn:
+            project = prepo.active_project(conn)
+            if project is None:
+                return "No hay proyecto activo."
+            try:
+                task = repo.assign_task(conn, task_id, project.id, worker)
+            except RepoError as exc:
+                return f"No pude asignar la tarea #{task_id}: {exc}"
+        return f"La tarea #{task.id} quedó en la cola de {worker}."
 
     def remember_task_prompt(self, chat_id: int, message_id: int) -> None:
         """Guarda el pedido de título en la base: una respuesta sigue valiendo después de reiniciar."""
@@ -323,4 +364,5 @@ class Commands:
 def _line(task: Task) -> str:
     # El emoji primero, para distinguir los estados de un vistazo.
     emoji, text = STATUS_EMOJI.get(task.status, "•"), STATUS_LABELS.get(task.status, task.status)
-    return f"{emoji} #{task.id} {task_title(task, 80)} · {text}"
+    worker = f" [{task.worker}]" if task.worker else ""
+    return f"{emoji} #{task.id}{worker} {task_title(task, 80)} · {text}"
