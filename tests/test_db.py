@@ -507,3 +507,32 @@ def test_question_lookup_through_deliveries(conn):
     assert repo.get_question_by_message(conn, 222, 77).id == q.id
     assert repo.get_question_by_message(conn, 333, 78) is None
     assert repo.get_question_by_message(conn, 111, 77) is None
+
+
+# --- v4: tipo de pregunta -----------------------------------------------------------------------
+
+
+def test_migration_v4_marks_existing_questions_as_open(app_paths):
+    from coclody.db import migrations
+
+    c = connect(app_paths.db_file)
+    with transaction(c):
+        for script in migrations.MIGRATIONS[:3]:
+            for statement in migrations._split(script):
+                c.execute(statement)
+        c.execute("PRAGMA user_version = 3")
+    c.execute("INSERT INTO tasks (title, status) VALUES ('vieja', 'waiting_input')")
+    c.execute("INSERT INTO questions (task_id, question) VALUES (1, '¿antes?')")
+    assert migrate(c) == SCHEMA_VERSION
+    (q,) = repo.list_questions(c, 1)
+    assert (q.question, q.kind) == ("¿antes?", "open")
+    c.close()
+
+
+def test_question_kind_is_validated(conn):
+    t = repo.create_task(conn, "x")
+    assert repo.ask_question(conn, t.id, "¿Sigo?", kind="yes_no").kind == "yes_no"
+    with pytest.raises(ValidationError):
+        repo.ask_question(conn, t.id, "¿Sigo?", kind="multiple")
+    with pytest.raises(sqlite3.IntegrityError):  # la base también lo impide
+        conn.execute("INSERT INTO questions (task_id, question, kind) VALUES (?, 'q', 'otra')", (t.id,))

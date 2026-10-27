@@ -42,6 +42,9 @@ class FakeTelegram(BaseRequest):
     def sent(self) -> list[dict]:
         return [params for name, params in self.calls if name == "sendMessage"]
 
+    def called(self, method: str) -> list[dict]:
+        return [params for name, params in self.calls if name == method]
+
     async def do_request(self, url, method, request_data=None, read_timeout=None, write_timeout=None,
                          connect_timeout=None, pool_timeout=None):
         name = url.rsplit("/", 1)[-1]
@@ -99,10 +102,7 @@ def message_update(chat_id: int, text: str, *, user_id: int | None = None, chat_
 
 def bot_message(message_id: int, chat_id: int, text: str, *, date: int | None = None) -> dict:
     """Un mensaje enviado por el bot, como lo devuelve Telegram: con entidades para cada /comando."""
-    entities = []
-    for word_start, word in _words(text):
-        if word.startswith("/") and len(word) > 1:
-            entities.append({"type": "bot_command", "offset": _utf16_len(text[:word_start]), "length": _utf16_len(word)})
+    entities = _command_entities(text)
     msg = {"message_id": message_id, "from": BOT_USER, "chat": {"id": chat_id, "first_name": "Nacho", "type": "private"},
            "date": int(time.time()) if date is None else date, "text": text}
     if entities:
@@ -116,6 +116,9 @@ def user_text(chat_id: int, text: str, *, reply_to: dict | None = None, external
     msg = {"message_id": message_id, "date": int(time.time()),
            "from": {"id": chat_id, "is_bot": False, "first_name": "Nacho", "language_code": "es"},
            "chat": {"id": chat_id, "first_name": "Nacho", "type": "private"}, "text": text}
+    entities = _command_entities(text)
+    if entities:
+        msg["entities"] = entities
     if reply_to is not None:
         msg["reply_to_message"] = reply_to
     if external_reply is not None:
@@ -131,6 +134,53 @@ def external_reply_to(message: dict) -> dict:
     """Cómo describe Telegram un reply a un mensaje de otro hilo o chat (ExternalReplyInfo)."""
     return {"origin": {"type": "user", "date": message["date"], "sender_user": message["from"]},
             "chat": message["chat"], "message_id": message["message_id"]}
+
+
+def markup(params: dict) -> dict | None:
+    """El reply_markup de una llamada, como dict (PTB lo puede mandar ya serializado)."""
+    value = params.get("reply_markup")
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def inline_data(params: dict) -> list[str]:
+    """Los callback_data de los botones inline de una llamada, en orden."""
+    m = markup(params) or {}
+    return [b["callback_data"] for row in m.get("inline_keyboard", []) for b in row]
+
+
+def bot_message_with_buttons(message_id: int, chat_id: int, params: dict) -> dict:
+    """El mensaje del bot tal como vuelve dentro de un callback_query: con su reply_markup."""
+    msg = bot_message(message_id, chat_id, params["text"])
+    if markup(params) is not None:
+        msg["reply_markup"] = markup(params)
+    return msg
+
+
+def callback_update(chat_id: int, data: str | None, *, message: dict | None, user_id: int | None = None,
+                    inline_message_id: str | None = None) -> dict:
+    """Un botón inline tocado, con la forma de la Bot API (CallbackQuery).
+
+    ``message`` es el mensaje del bot que tenía el botón (su chat es el chat del update);
+    ``user_id`` es quien lo tocó. Sin ``message`` y con ``inline_message_id`` es un botón de un
+    mensaje enviado en modo inline: no tiene chat. Sin ``data`` es un botón de juego.
+    """
+    query = {"id": str(next(_update_ids) * 7919), "chat_instance": "-4242",
+             "from": {"id": chat_id if user_id is None else user_id, "is_bot": False, "first_name": "Nacho"}}
+    if message is not None:
+        query["message"] = message
+    if inline_message_id is not None:
+        query["inline_message_id"] = inline_message_id
+    if data is not None:
+        query["data"] = data
+    else:
+        query["game_short_name"] = "juego"
+    return {"update_id": next(_update_ids), "callback_query": query}
+
+
+def _command_entities(text: str) -> list[dict]:
+    # Telegram marca cada /comando del texto con una entidad bot_command (offsets en UTF-16).
+    return [{"type": "bot_command", "offset": _utf16_len(text[:start]), "length": _utf16_len(word)}
+            for start, word in _words(text) if word.startswith("/") and len(word) > 1]
 
 
 def _words(text: str):

@@ -7,7 +7,8 @@ Ciclo de una tarea:
 - Se ejecuta una sola tarea a la vez.
 - Si Claude Code necesita un dato, termina su respuesta con una línea
   ``COCLODY_PREGUNTA: ...``; la tarea pasa a ``waiting_input`` con esa
-  pregunta, y al responderla vuelve a la cola.
+  pregunta, y al responderla vuelve a la cola. Si la pregunta es de sí o no,
+  la línea empieza con ``COCLODY_PREGUNTA_SINO:`` y se envía con botones.
 - Cada paso queda en la base (run + eventos). Si CoClody se corta a mitad de
   camino, ``recover()`` al arrancar cierra lo que quedó colgado.
 - La cancelación es cooperativa: el bot pide cancelar en ``CancelRegistry`` y
@@ -30,6 +31,7 @@ from coclody.orchestrator.sandbox import SandboxError
 log = logging.getLogger(__name__)
 
 QUESTION_MARKER = "COCLODY_PREGUNTA:"
+YES_NO_MARKER = "COCLODY_PREGUNTA_SINO:"
 CANCEL_USER = "user"
 CANCEL_SHUTDOWN = "shutdown"
 
@@ -42,6 +44,7 @@ Instrucciones:
 - Trabajá solo dentro de la carpeta actual.
 - Si para avanzar necesitás un dato que no tenés y no podés deducir, no lo inventes: terminá tu
   respuesta con una única línea final que empiece exactamente con "{marker}" seguida de la pregunta.
+  Si la pregunta se contesta solo con "sí" o "no", empezá esa línea con "{yes_no_marker}" en su lugar.
 - Si terminaste, resumí en pocas líneas qué hiciste.
 """
 
@@ -161,10 +164,11 @@ class Worker:
             repo.add_event(conn, task.id, "error", result.summary, run_id=run_id)
             return repo.transition_task(conn, task.id, "failed", expected="running")
 
-        question = extract_question(result.result_text)
-        if question:
+        parsed = parse_question(result.result_text)
+        if parsed:
+            question, kind = parsed
             repo.add_event(conn, task.id, "question", question, run_id=run_id)
-            repo.ask_question(conn, task.id, question)
+            repo.ask_question(conn, task.id, question, kind=kind)
             return repo.transition_task(conn, task.id, "waiting_input", expected="running")
         repo.add_event(conn, task.id, "progress", result.summary, run_id=run_id)
         return repo.transition_task(conn, task.id, "done", expected="running")
@@ -177,21 +181,35 @@ def build_prompt(task: Task, answered: list[Question]) -> str:
         answers = f"\nRespuestas del usuario a tus preguntas anteriores:\n{lines}\n"
     description = f"\n{task.description}\n" if task.description else ""
     return PROMPT_TEMPLATE.format(
-        id=task.id, title=task.title, description=description, answers=answers, marker=QUESTION_MARKER
+        id=task.id,
+        title=task.title,
+        description=description,
+        answers=answers,
+        marker=QUESTION_MARKER,
+        yes_no_marker=YES_NO_MARKER,
     )
 
 
 def extract_question(result_text: str | None) -> str | None:
-    """La pregunta, si la última línea no vacía del resultado empieza con el marcador."""
+    """La pregunta, si la última línea no vacía del resultado empieza con un marcador."""
+    parsed = parse_question(result_text)
+    return parsed[0] if parsed else None
+
+
+def parse_question(result_text: str | None) -> tuple[str, str] | None:
+    """(pregunta, tipo) si la última línea no vacía empieza con un marcador; tipo es "open" o "yes_no"."""
     if not result_text:
         return None
     lines = [line.strip() for line in result_text.strip().splitlines() if line.strip()]
-    if not lines or not lines[-1].startswith(QUESTION_MARKER):
+    if not lines:
         return None
-    question = lines[-1][len(QUESTION_MARKER) :].strip()
-    if not question:
-        return None
-    return question if len(question) <= 4000 else question[:3999] + "…"
+    for marker, kind in ((YES_NO_MARKER, "yes_no"), (QUESTION_MARKER, "open")):
+        if lines[-1].startswith(marker):
+            question = lines[-1][len(marker) :].strip()
+            if not question:
+                return None
+            return (question if len(question) <= 4000 else question[:3999] + "…"), kind
+    return None
 
 
 def _failure(summary: str) -> ClaudeResult:

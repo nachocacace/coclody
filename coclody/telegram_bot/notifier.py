@@ -13,6 +13,9 @@ Si Telegram rechaza el mensaje de forma permanente (bot bloqueado, chat
 inexistente) ese envío se registra como ``rejected`` y se loguea, para no
 reintentarlo para siempre. Ante errores transitorios (red, rate limit) se
 corta la tanda y se reintenta en la próxima.
+
+Botones: una pregunta de sí/no va con botones Sí/No, y un fallo con el botón
+Reintentar. El resto de los mensajes va sin botones.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 from coclody.db import DbFactory, repo
 from coclody.db.repo import Question, Run, Task, TaskEvent
 from coclody.telegram_bot.commands import clip
+from coclody.telegram_bot.keyboards import question_buttons, task_buttons
 
 log = logging.getLogger(__name__)
 
@@ -51,9 +55,10 @@ def format_failed(task: Task, run: Run | None) -> str:
 
 
 def format_question(task: Task, question: Question) -> str:
+    buttons = "Tocá Sí o No, o respondé con texto: " if question.kind == "yes_no" else "Para responder: "
     return clip(
         f"❓ La tarea #{task.id} ({task.title}) necesita un dato:\n\n{question.question}\n\n"
-        f"Para responder: mantené apretado este mensaje → Responder, o mandá /responder {task.id} <respuesta>. "
+        f"{buttons}mantené apretado este mensaje → Responder, o mandá /responder {task.id} <respuesta>. "
         "Si contestás desde la notificación, Telegram no lo toma como respuesta a este mensaje."
     )
 
@@ -80,19 +85,20 @@ async def flush_notifications(bot: Bot, db: DbFactory, allowed_chat_ids: Iterabl
 async def _deliver(bot: Bot, db: DbFactory, item: _Pending, recipients: list[int]) -> None:
     """Envía las partes que falten. Un error transitorio se propaga (corta la tanda)."""
     if item.new_status == "waiting_input":
-        parts = [(q.id, format_question(item.task, q)) for q in item.questions]
+        parts = [(q.id, format_question(item.task, q), question_buttons(q)) for q in item.questions]
     elif item.new_status == "done":
-        parts = [(0, format_done(item.task, item.last_run))]
+        parts = [(0, format_done(item.task, item.last_run), None)]
     elif item.new_status == "failed":
-        parts = [(0, format_failed(item.task, item.last_run))]
+        retry = task_buttons([(item.task.id, "retry")]) if item.task.status == "failed" else None
+        parts = [(0, format_failed(item.task, item.last_run), retry)]
     else:
         return
-    for part, text in parts:
+    for part, text, markup in parts:
         for chat_id in recipients:
             if (chat_id, part) in item.delivered:
                 continue
             try:
-                sent = await bot.send_message(chat_id=chat_id, text=text)
+                sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
             except (Forbidden, BadRequest) as exc:
                 log.warning("Telegram rechazó la notificación al chat %s: %s", chat_id, exc)
                 await asyncio.to_thread(_record, db, item.event.id, chat_id, part, "rejected", None)

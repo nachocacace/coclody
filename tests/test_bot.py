@@ -437,7 +437,7 @@ def test_polling_drops_pending_updates(monkeypatch, services):
     monkeypatch.setattr(type(application), "run_polling", lambda self, **kw: captured.update(kw))
     app_module.run_polling(application)
     assert captured == {
-        "allowed_updates": ["message"],
+        "allowed_updates": ["message", "callback_query"],
         "drop_pending_updates": True,
         "close_loop": False,  # el loop es nuestro: la limpieza final corre en él (ver test_shutdown)
     }

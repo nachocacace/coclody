@@ -81,6 +81,7 @@ class Question:
     answered_at: str | None
     answered_by: int | None
     tg_chat_id: int | None
+    kind: str = "open"
 
 
 @dataclass(frozen=True)
@@ -242,13 +243,18 @@ def delete_task(conn: sqlite3.Connection, task_id: int) -> bool:
 # --- questions ----------------------------------------------------------------
 
 
-def ask_question(conn: sqlite3.Connection, task_id: int, question: str) -> Question:
+QUESTION_KINDS = ("open", "yes_no")
+
+
+def ask_question(conn: sqlite3.Connection, task_id: int, question: str, kind: str = "open") -> Question:
     text = _text(question, "question", 4000)
+    if kind not in QUESTION_KINDS:
+        raise ValidationError(f"tipo de pregunta inválido: {kind!r}")
     with transaction(conn):
         task = _get(conn, Task, "tasks", task_id)
         if task.status in TERMINAL_STATUSES:
             raise InvalidTransitionError(f"la tarea {task.id} ya terminó ('{task.status}')")
-        cur = conn.execute("INSERT INTO questions (task_id, question) VALUES (?, ?)", (task.id, text))
+        cur = conn.execute("INSERT INTO questions (task_id, question, kind) VALUES (?, ?, ?)", (task.id, text, kind))
         return _get(conn, Question, "questions", cur.lastrowid)
 
 

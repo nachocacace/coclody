@@ -6,7 +6,14 @@
 - Solo se procesan mensajes nuevos escritos por el usuario: los editados, los
   reenviados y los enviados a través de otro bot se ignoran (en el guard y,
   además, en los filtros de cada handler).
-- Solo se piden updates de tipo ``message`` a Telegram.
+- Los botones inline llegan como ``callback_query`` y pasan por el mismo guard:
+  lista blanca primero (el chat es el del mensaje con el botón, el usuario es
+  quien lo tocó) y, si no está autorizado, se corta antes de tocar la base.
+  Un botón sin mensaje (modo inline) o sin datos se ignora. Un callback no
+  trae fecha propia (la del mensaje es la de cuando lo envió el bot), así que
+  no se filtra por antigüedad: los que estaban acumulados al arrancar los
+  descarta ``drop_pending_updates``, y cada acción revalida el estado actual.
+- Solo se piden updates de tipo ``message`` y ``callback_query`` a Telegram.
 - Al arrancar se descartan los updates que Telegram tenía acumulados
   (``drop_pending_updates``), y además se ignora cualquier mensaje con fecha
   anterior al arranque: un comando de hace horas nunca dispara una tarea.
@@ -23,14 +30,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from telegram import Update
+from telegram import ForceReply, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup, Update
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
     ApplicationHandlerStop,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -43,13 +53,23 @@ from coclody.config import Config
 from coclody.db import DbFactory
 from coclody.orchestrator.worker import CANCEL_SHUTDOWN, Worker
 from coclody.security import ChatGuard
-from coclody.telegram_bot.commands import Commands, clip
+from coclody.telegram_bot.commands import Commands, clip, parse_task_id
+from coclody.telegram_bot.keyboards import (
+    BUTTON_HELP,
+    BUTTON_LIST,
+    BUTTON_NEW,
+    MAIN_KEYBOARD,
+    NEW_TASK_PROMPT,
+    TaskAction,
+    parse_callback,
+    task_buttons,
+)
 from coclody.telegram_bot.notifier import flush_notifications
 from coclody.updater.client import Updater, UpdateResult
 
 log = logging.getLogger(__name__)
 
-ALLOWED_UPDATES = ["message"]
+ALLOWED_UPDATES = ["message", "callback_query"]
 WORKER_IDLE_S = 2.0
 NOTIFY_INTERVAL_S = 3.0
 SHUTDOWN_WAIT_S = 30.0
@@ -76,6 +96,15 @@ class Services:
         self.commands = Commands(self.db, self.worker.cancels)
 
 
+@dataclass(frozen=True)
+class Reply:
+    """Respuesta de un handler: texto, botones opcionales y qué hacer con el mensaje enviado."""
+
+    text: str
+    markup: InlineKeyboardMarkup | ReplyKeyboardMarkup | ForceReply | None = None
+    on_sent: Callable[[Message], None] | None = None
+
+
 def build_application(
     token: str,
     services: Services,
@@ -94,30 +123,66 @@ def build_application(
     app.add_handler(TypeHandler(Update, _guard), group=-1)
     c = services.commands
     only_new = filters.UpdateType.MESSAGE & ~filters.FORWARDED & ~filters.VIA_BOT
+
+    def help_(update: Update) -> Reply:
+        return Reply(c.help(), MAIN_KEYBOARD)
+
+    def list_(update: Update) -> Reply:
+        return Reply(c.list_tasks(), task_buttons(c.list_actions(), with_id=True))
+
+    def new(chat_id: int, text: str) -> Reply:
+        reply, task_id = c.create_task(chat_id, text)
+        return Reply(reply, task_buttons(c.task_actions(task_id)) if task_id else None)
+
+    def status(update: Update) -> Reply:
+        task_id = parse_task_id(_args(update))
+        return Reply(c.status(_args(update)), task_buttons(c.task_actions(task_id)) if task_id else None)
+
     for names, fn in (
-        (("start", "ayuda"), lambda u: c.help()),
-        (("lista",), lambda u: c.list_tasks()),
-        (("nueva",), lambda u: c.new_task(u.effective_chat.id, _args(u))),
-        (("estado",), lambda u: c.status(_args(u))),
+        (("start", "ayuda"), help_),
+        (("lista",), list_),
+        (("nueva",), lambda u: new(u.effective_chat.id, _args(u))),
+        (("estado",), status),
         (("responder",), lambda u: c.answer(u.effective_chat.id, _args(u))),
         (("cancelar",), lambda u: c.cancel(_args(u))),
         (("reintentar",), lambda u: c.retry(_args(u))),
     ):
         app.add_handler(CommandHandler(list(names), _reply_with(fn), filters=only_new))
 
-    def on_text(update: Update) -> str:
+    def on_text(update: Update) -> str | Reply:
         message, chat_id = update.effective_message, update.effective_chat.id
+        # Los botones del teclado fijo llegan como texto con su etiqueta exacta. Van primero: si el
+        # cliente los mandara como reply a una pregunta, no deben quedar registrados como respuesta.
+        if message.text == BUTTON_NEW:
+            return Reply(
+                "Escribí el título de la tarea como respuesta a este mensaje. "
+                "Las líneas siguientes al título son la descripción.",
+                NEW_TASK_PROMPT,
+                on_sent=lambda sent: c.remember_task_prompt(chat_id, sent.message_id),
+            )
+        if message.text == BUTTON_LIST:
+            return list_(update)
+        if message.text == BUTTON_HELP:
+            return help_(update)
         target = replied_message_id(message, chat_id)
         if target is None:
             log.info("Texto sin reply a una pregunta: %s", _reply_shape(message))
             return c.unmatched_text(chat_id)
+        if c.take_task_prompt(chat_id, target):
+            return new(chat_id, message.text)
         text = c.answer_reply(chat_id, target, message.text)
-        return text if text is not None else "Ese mensaje no es una pregunta pendiente. Usá /responder <id> <texto>."
+        if text is not None:
+            return text
+        return (
+            "Ese mensaje no es una pregunta pendiente ni un pedido de título vigente. "
+            f"Usá /responder <id> <texto>, o tocá «{BUTTON_NEW}» de nuevo."
+        )
 
     # Todo texto que no sea comando pasa por on_text: la decisión de si es una respuesta se toma
     # en código (replied_message_id), no en un filtro que dependa de la forma exacta del update.
     app.add_handler(MessageHandler(only_new & filters.TEXT & ~filters.COMMAND, _reply_with(on_text)))
     app.add_handler(MessageHandler(only_new, _reply_with(lambda u: "No entendí. Mandá /ayuda para ver los comandos.")))
+    app.add_handler(CallbackQueryHandler(_on_callback))
     app.add_error_handler(_on_error)
     return app
 
@@ -175,6 +240,13 @@ def _verdict(update: Update, services: Services) -> tuple[str, str | None]:
         chat.id if chat else None, user.id if user else None, chat.type if chat else None, kind
     ):
         return "deny", None
+    query = update.callback_query
+    if query is not None:
+        # Sin mensaje (botón de un mensaje inline) no hay chat que validar; sin datos (juegos) no hay acción.
+        if query.message is None or not isinstance(query.data, str):
+            log.info("Ignorado un botón sin mensaje o sin datos")
+            return "ignore", None
+        return "ok", None
     message = update.message  # solo mensajes nuevos; edited_message y el resto no
     if message is None:
         log.info("Ignorado un update de tipo %s", kind)
@@ -190,11 +262,42 @@ def _verdict(update: Update, services: Services) -> tuple[str, str | None]:
 
 def _reply_with(fn):
     async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        text = await asyncio.to_thread(fn, update)
-        if text:
-            await update.effective_message.reply_text(clip(text))
+        reply = await asyncio.to_thread(fn, update)
+        if isinstance(reply, str):
+            reply = Reply(reply)
+        if reply is None or not reply.text:
+            return
+        sent = await update.effective_message.reply_text(clip(reply.text), reply_markup=reply.markup)
+        if reply.on_sent is not None:
+            reply.on_sent(sent)
 
     return handler
+
+
+async def _on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Un botón inline. El guard ya validó el chat y el usuario; el dato se valida acá."""
+    c: Commands = context.bot_data["services"].commands
+    query, chat_id = update.callback_query, update.effective_chat.id
+    action = parse_callback(query.data)
+    if action is None:
+        log.info("Ignorado un botón con datos no reconocidos")
+        await query.answer("Ese botón no es válido.")
+        return
+    if isinstance(action, TaskAction):
+        fn = c.cancel if action.action == "cancel" else c.retry
+        text, remove_buttons = await asyncio.to_thread(fn, str(action.task_id)), False
+    else:
+        text, remove_buttons = await asyncio.to_thread(
+            c.answer_button, chat_id, query.message.message_id, action.question_id, action.answer
+        )
+        text = f"Respuesta: {action.answer}. {text}" if text.startswith("Respuesta registrada") else text
+    await query.answer()
+    if remove_buttons:
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except TelegramError as exc:
+            log.warning("No se pudieron sacar los botones del mensaje: %s", exc)
+    await context.bot.send_message(chat_id=chat_id, text=clip(text))
 
 
 def replied_message_id(message, chat_id: int) -> int | None:

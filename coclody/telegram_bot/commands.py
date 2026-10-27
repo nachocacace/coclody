@@ -12,6 +12,8 @@ total (cualquiera de esos chats puede ver, responder y cancelar cualquier tarea)
 from __future__ import annotations
 
 import re
+import threading
+from collections import deque
 
 from coclody.db import DbFactory, repo
 from coclody.db.repo import InvalidTransitionError, Question, RepoError, Task
@@ -21,6 +23,7 @@ TELEGRAM_MAX_CHARS = 4096
 ACTIVE_STATUSES = ("pending", "queued", "running", "waiting_input")
 FINISHED_STATUSES = ("done", "failed", "cancelled")
 CANCELLABLE_STATUSES = frozenset({"pending", "queued", "waiting_input"})
+MAX_TASK_PROMPTS = 20
 
 STATUS_LABELS = {
     "pending": "pendiente",
@@ -41,7 +44,9 @@ CoClody: tareas para Claude Code.
 /responder <id> <texto>: responde la pregunta pendiente de una tarea. También podés responder directamente al mensaje de la pregunta.
 /cancelar <id>: cancela una tarea
 /reintentar <id>: vuelve a poner en cola una tarea que falló
-/ayuda: esta ayuda"""
+/ayuda: esta ayuda
+
+También podés usar los botones de abajo (Nueva tarea, Ver cola, Ayuda) y los que aparecen en cada tarea y en las preguntas de sí o no."""
 
 _ID_RE = re.compile(r"#?([1-9][0-9]{0,15})")
 
@@ -63,6 +68,10 @@ class Commands:
     def __init__(self, db: DbFactory, cancels: CancelRegistry):
         self._db = db
         self._cancels = cancels
+        # Mensajes "escribí el título" enviados por el botón Nueva tarea, por chat. Solo en memoria:
+        # después de reiniciar, responder a uno viejo no crea nada (y se explica).
+        self._prompts_lock = threading.Lock()
+        self._task_prompts: dict[int, deque[int]] = {}
 
     def help(self) -> str:
         return HELP
@@ -82,17 +91,52 @@ class Commands:
             parts.append("Últimas terminadas:\n" + "\n".join(_line(t) for t in finished))
         return "\n\n".join(parts)
 
+    def list_actions(self) -> list[tuple[int, str]]:
+        """Botones de la lista: cancelar las activas y reintentar las fallidas que se muestran."""
+        with self._db() as conn:
+            active = repo.list_tasks(conn, statuses=ACTIVE_STATUSES, limit=20)
+            finished = repo.list_tasks(conn, statuses=FINISHED_STATUSES, limit=5)
+        return [(t.id, "cancel") for t in active] + [(t.id, "retry") for t in finished if t.status == "failed"]
+
+    def task_actions(self, task_id: int) -> list[tuple[int, str]]:
+        with self._db() as conn:
+            task = repo.get_task(conn, task_id)
+        if task is None:
+            return []
+        if task.status in ACTIVE_STATUSES:
+            return [(task.id, "cancel")]
+        if task.status == "failed":
+            return [(task.id, "retry")]
+        return []
+
     def new_task(self, chat_id: int, text: str) -> str:
+        return self.create_task(chat_id, text)[0]
+
+    def create_task(self, chat_id: int, text: str) -> tuple[str, int | None]:
+        """Texto de respuesta e id de la tarea creada (None si no se creó)."""
         title, _, description = text.strip().partition("\n")
         if not title.strip():
-            return "Uso: /nueva <título>\n(las líneas siguientes son la descripción, opcional)"
+            return "Uso: /nueva <título>\n(las líneas siguientes son la descripción, opcional)", None
         try:
             with self._db() as conn:
                 task = repo.create_task(conn, title, description=description or None, created_by=chat_id)
                 task = repo.transition_task(conn, task.id, "queued", expected="pending")
         except RepoError as exc:
-            return f"No pude crear la tarea: {exc}"
-        return f"Creé la tarea #{task.id}: {task.title}\nQuedó en cola."
+            return f"No pude crear la tarea: {exc}", None
+        return f"Creé la tarea #{task.id}: {task.title}\nQuedó en cola.", task.id
+
+    def remember_task_prompt(self, chat_id: int, message_id: int) -> None:
+        with self._prompts_lock:
+            self._task_prompts.setdefault(chat_id, deque(maxlen=MAX_TASK_PROMPTS)).append(message_id)
+
+    def take_task_prompt(self, chat_id: int, message_id: int) -> bool:
+        """True (una sola vez) si ese mensaje es un pedido de título enviado a este chat."""
+        with self._prompts_lock:
+            prompts = self._task_prompts.get(chat_id)
+            if prompts is None or message_id not in prompts:
+                return False
+            prompts.remove(message_id)
+            return True
 
     def status(self, arg: str) -> str:
         task_id = parse_task_id(arg)
@@ -150,6 +194,20 @@ class Commands:
             if question.status != "open":
                 return "Esa pregunta ya no está pendiente."
             return self._answer(conn, question, text, chat_id)
+
+    def answer_button(self, chat_id: int, message_id: int, question_id: int, answer: str) -> tuple[str, bool]:
+        """Botón Sí/No. Devuelve el texto y si hay que sacar los botones del mensaje.
+
+        El botón solo vale en el mensaje que envió esa pregunta a este chat: un
+        ``callback_data`` con otra pregunta, o sobre otro mensaje, no responde nada.
+        """
+        with self._db() as conn:
+            question = repo.get_question_by_message(conn, chat_id, message_id)
+            if question is None or question.id != question_id or question.kind != "yes_no":
+                return "Ese botón no corresponde a una pregunta pendiente.", True
+            if question.status != "open":
+                return "Esa pregunta ya no está pendiente.", True
+            return self._answer(conn, question, answer, chat_id), True
 
     def unmatched_text(self, chat_id: int) -> str:
         """Texto que no es un comando ni un reply a una pregunta.

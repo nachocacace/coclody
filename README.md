@@ -135,7 +135,15 @@ Hacé una tabla con fecha, proveedor y monto en un archivo resumen.csv
 
 - Las tareas se hacen **de a una**, en orden.
 - Te llega un mensaje cuando una tarea **termina**, **falla** o **necesita un dato**.
-- Si Claude necesita algo, te manda la pregunta: **respondé directamente a ese mensaje** (mantené apretado el mensaje → Responder) o usá `/responder`. Con eso la tarea sigue sola.
+- Si Claude necesita algo, te manda la pregunta: **respondé directamente a ese mensaje** (mantené apretado el mensaje → Responder) o usá `/responder`. Con eso la tarea sigue sola. Si escribís el texto suelto en el chat, sin Responder, CoClody no lo toma como respuesta: te explica cómo contestar.
+
+### Botones
+
+Para no escribir comandos desde el celular:
+
+- **Teclado fijo** (aparece con `/start` o `/ayuda`): **➕ Nueva tarea**, **📋 Ver cola** y **❓ Ayuda**. Con *Nueva tarea*, el bot te pide el título: escribilo como respuesta a ese mensaje (Telegram abre la respuesta solo). Las líneas debajo del título son la descripción.
+- **En cada tarea**: el mensaje de creación, `/estado` y `/lista` traen **✖ Cancelar** en las tareas activas y **↻ Reintentar** en las que fallaron. El aviso de una tarea fallida también trae **↻ Reintentar**.
+- **Preguntas de sí o no**: si Claude marca la pregunta como de sí/no, el mensaje trae **Sí** y **No**. Igual podés responder con texto si querés aclarar algo.
 
 ## Actualizaciones
 
@@ -219,7 +227,8 @@ Estos son supuestos explícitos del diseño. Si alguno no se cumple en tu caso, 
    - el directorio de trabajo es `workspace_root`, verificado después de resolver symlinks;
    - las herramientas disponibles y preaprobadas son solo las de `allowed_tools`, y todo lo demás se deniega (`--permission-mode dontAsk`, `--permission-prompts none`);
    - el texto de las tareas va por stdin, nunca como argumento, así que no puede inyectar flags;
-   - solo se procesan mensajes nuevos escritos por vos: los editados, los reenviados y los enviados a través de otro bot se ignoran; si el control de acceso falla por un error, deniega.
+   - solo se procesan mensajes nuevos escritos por vos: los editados, los reenviados y los enviados a través de otro bot se ignoran; si el control de acceso falla por un error, deniega;
+   - los botones pasan por el mismo control que los mensajes: el chat del mensaje con el botón y la persona que lo tocó tienen que estar en la lista blanca (y ser el mismo chat privado); si no, se registra en `security.log` y no se toca la base. Los datos de cada botón se validan con un formato estricto, y un Sí/No solo vale en el mensaje que envió esa pregunta a ese chat.
 5. **El token del bot vive solo en el llavero del sistema.** No está en el código, en el repo ni en la config, y se redacta de todos los logs.
 6. **Sin API paga.** Del entorno de Claude Code se quitan `ANTHROPIC_*` y `CLAUDE_CODE_USE_*`, para que siempre use tu sesión de Claude Code.
 7. **Actualizaciones firmadas.** Solo se instala un release cuyo manifiesto esté firmado (Ed25519) con la clave pública embebida en la app, que sea de una versión estrictamente mayor y cuyo archivo coincida en tamaño y SHA-256. La clave privada vive solo en el llavero de quien publica, nunca en el repo ni en GitHub Actions; quien la tenga puede publicar actualizaciones que las instalaciones existentes van a aceptar.
@@ -319,6 +328,7 @@ Huecos de tests conocidos (el código existe, pero no hay un test que lo ejercit
 Otros:
 
 - **Polling muerto, proceso vivo.** Si el polling termina con error (p. ej. `InvalidToken` porque se revocó el token), python-telegram-bot no para la aplicación. CoClody sigue corriendo sin recibir mensajes hasta que se lo cierra; al cerrarlo, la limpieza sí corre (`run_polling`).
+- **El pedido de título del botón *Nueva tarea* vive en memoria.** Si CoClody se reinicia entre el pedido y la respuesta, la respuesta no crea nada y el bot explica que hay que tocar el botón de nuevo.
 
 - `questions.tg_chat_id`, `questions.tg_message_id` y `repo.set_question_message()` quedaron sin uso desde la migración v3: las respuestas por reply se resuelven con `notification_deliveries`. Se mantienen para no migrar solo para quitarlas.
 - **Proceso huérfano en macOS/Linux.** Claude Code corre en una sesión propia. Si CoClody muere de golpe o se cierra la Terminal donde corre, Claude y sus procesos siguen sin timeout. Al reiniciar, la tarea se marca como fallida, pero el proceso viejo puede seguir trabajando en la misma carpeta. En Windows no pasa: el Job Object mata el árbol cuando CoClody termina.

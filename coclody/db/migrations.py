@@ -110,8 +110,14 @@ CREATE INDEX idx_deliveries_message ON notification_deliveries(chat_id, tg_messa
     WHERE tg_message_id IS NOT NULL;
 """
 
+# v4: tipo de pregunta. ``yes_no`` cuando Claude la marcó como de sí/no: se
+# envía con botones Sí/No además de poder responderse con texto.
+_V4 = """
+ALTER TABLE questions ADD COLUMN kind TEXT NOT NULL DEFAULT 'open' CHECK (kind IN ('open', 'yes_no'));
+"""
+
 # Orden estricto: la migración N lleva la base de user_version N-1 a N.
-MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3)
+MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

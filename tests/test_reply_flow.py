@@ -197,7 +197,8 @@ def test_reply_to_a_bot_message_that_is_not_a_question(setup):
         await app.shutdown()
         return replies
 
-    assert run(scenario()) == ["Ese mensaje no es una pregunta pendiente. Usá /responder <id> <texto>."]
+    (reply,) = run(scenario())
+    assert reply.startswith("Ese mensaje no es una pregunta pendiente") and "/responder <id> <texto>" in reply
 
 
 def test_plain_text_without_pending_questions_is_still_no_entendi(setup):
