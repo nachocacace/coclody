@@ -48,7 +48,8 @@ def test_linux_xdg_and_relative_values_ignored():
     assert p.logs_dir == Path("/xdg/state/coclody")
 
 
-def test_defaults_use_real_platform():
+def test_defaults_use_real_platform(monkeypatch):
+    monkeypatch.delenv("COCLODY_DATA_DIR", raising=False)
     assert default_paths() == default_paths(platform=sys.platform, env=os.environ, home=Path.home())
 
 
@@ -77,3 +78,70 @@ def test_frozen_detection(monkeypatch):
     monkeypatch.setattr(sys, "_MEIPASS", "/tmp/_MEI123", raising=False)
     assert paths.is_frozen() is True
     assert paths.executable_path() == Path(sys.executable).resolve()
+
+
+# --- COCLODY_DATA_DIR -----------------------------------------------------------
+
+
+def test_data_dir_override_puts_everything_under_it(tmp_path):
+    root = tmp_path / "coclody-test"
+    for platform in ("darwin", "win32", "linux"):
+        p = default_paths(platform=platform, env={"COCLODY_DATA_DIR": str(root)}, home=tmp_path / "home")
+        assert p == AppPaths.under(root.resolve())
+        assert p.db_file == root.resolve() / "coclody.db"
+        assert p.security_log == root.resolve() / "logs" / "security.log"
+
+
+def test_data_dir_override_inside_home_is_fine(tmp_path):
+    home = tmp_path / "home"
+    p = default_paths(platform="darwin", env={"COCLODY_DATA_DIR": str(home / "pruebas")}, home=home)
+    assert p.data_dir == (home / "pruebas").resolve()
+
+
+def test_data_dir_override_expands_user(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    p = default_paths(platform="darwin", env={"COCLODY_DATA_DIR": "~/x"}, home=tmp_path / "otro")
+    assert p.data_dir == (tmp_path / "x").resolve()
+
+
+def _anchor() -> str:
+    return Path.cwd().anchor
+
+
+@pytest.mark.parametrize(
+    "make_value",
+    [
+        lambda home: "",
+        lambda home: "   ",
+        lambda home: "relativa/carpeta",
+        lambda home: _anchor(),
+        lambda home: str(home),
+        lambda home: str(home) + os.sep,
+        lambda home: str(home.parent),
+        lambda home: str(home / "sub" / ".." / ".."),
+    ],
+)
+def test_data_dir_override_rejects(tmp_path, make_value):
+    home = tmp_path / "home"
+    home.mkdir()
+    with pytest.raises(paths.DataDirError):
+        default_paths(platform=sys.platform, env={"COCLODY_DATA_DIR": make_value(home)}, home=home)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlinks sin privilegios solo en POSIX")
+def test_data_dir_override_symlink_to_home_rejected(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(home, target_is_directory=True)
+    with pytest.raises(paths.DataDirError):
+        default_paths(platform="darwin", env={"COCLODY_DATA_DIR": str(link)}, home=home)
+
+
+def test_data_dir_override_gets_private_permissions(tmp_path):
+    p = default_paths(platform=sys.platform, env={"COCLODY_DATA_DIR": str(tmp_path / "d")}, home=tmp_path / "h")
+    p.ensure()
+    if os.name == "posix":
+        for d in p.all_dirs():
+            assert stat.S_IMODE(d.stat().st_mode) == 0o700

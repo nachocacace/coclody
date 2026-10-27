@@ -153,7 +153,7 @@ def test_workspace_symlink_is_resolved(app_paths, tmp_path):
     assert "carpeta de CoClody" in problems(app_paths)[0]
 
 
-@pytest.mark.parametrize("tools", ['["Bash"]', '["Read", 3]', '["rm -rf"]', '"Read"', '["Bash(a)(b)"]'])
+@pytest.mark.parametrize("tools", ['["Read\\n"]', '["Bash(a,b)"]', '["Bash"]', '["Read", 3]', '["rm -rf"]', '"Read"', '["Bash(a)(b)"]'])
 def test_bad_tools(app_paths, workspace, tools):
     write(app_paths, minimal(workspace) + f"allowed_tools = {tools}\n")
     assert problems(app_paths)[0].startswith("claude.allowed_tools:")
@@ -170,7 +170,7 @@ def test_updates_enabled_requires_repo(app_paths, workspace):
     assert problems(app_paths) == ["updates.github_repo: es obligatorio si updates.enabled = true"]
 
 
-@pytest.mark.parametrize("repo", ['"coclody"', '"a/b/c"', '"https://github.com/a/b"', '"a b/c"'])
+@pytest.mark.parametrize("repo", ['"a/b\\n"', '"coclody"', '"a/b/c"', '"https://github.com/a/b"', '"a b/c"'])
 def test_bad_repo(app_paths, workspace, repo):
     write(app_paths, minimal(workspace) + f"[updates]\ngithub_repo = {repo}\n")
     assert problems(app_paths)[0].startswith("updates.github_repo:")

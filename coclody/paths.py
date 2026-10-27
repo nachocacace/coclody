@@ -8,6 +8,11 @@ de PyInstaller (donde ``__file__`` apunta a una carpeta temporal).
 - Windows: %LOCALAPPDATA%\\CoClody                  (logs en ...\\CoClody\\logs)
 - Linux:   $XDG_DATA_HOME/coclody, $XDG_CONFIG_HOME/coclody, $XDG_STATE_HOME/coclody
            (no es plataforma objetivo; existe para que nada explote en CI)
+
+``COCLODY_DATA_DIR`` reemplaza todo lo anterior por una sola carpeta (datos,
+config y logs en ``<dir>/logs``), p. ej. para probar sin tocar el perfil real.
+Tiene que ser una ruta absoluta que no sea la raíz, el home ni un ancestro del
+home. Un valor inválido es un error: nunca se cae en silencio a las rutas reales.
 """
 
 from __future__ import annotations
@@ -19,6 +24,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 APP_NAME = "CoClody"
+DATA_DIR_ENV = "COCLODY_DATA_DIR"
+
+
+class DataDirError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -73,6 +83,9 @@ def default_paths(
     env = os.environ if env is None else env
     home = Path.home() if home is None else home
 
+    if DATA_DIR_ENV in env:
+        return AppPaths.under(_data_dir_override(env[DATA_DIR_ENV], home))
+
     if platform == "darwin":
         data = home / "Library" / "Application Support" / APP_NAME
         return AppPaths(data_dir=data, config_dir=data, logs_dir=home / "Library" / "Logs" / APP_NAME)
@@ -89,6 +102,21 @@ def default_paths(
         config_dir=(_env_dir(env, "XDG_CONFIG_HOME") or home / ".config") / name,
         logs_dir=(_env_dir(env, "XDG_STATE_HOME") or home / ".local" / "state") / name,
     )
+
+
+def _data_dir_override(value: str, home: Path) -> Path:
+    value = value.strip()
+    if not value:
+        raise DataDirError(f"{DATA_DIR_ENV} está definida pero vacía")
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise DataDirError(f"{DATA_DIR_ENV} tiene que ser una ruta absoluta: {value!r}")
+    resolved, home = path.resolve(), home.resolve()
+    if resolved.parent == resolved:
+        raise DataDirError(f"{DATA_DIR_ENV} no puede ser la raíz del disco")
+    if home.is_relative_to(resolved):
+        raise DataDirError(f"{DATA_DIR_ENV} no puede ser el home ni una carpeta que lo contenga")
+    return resolved
 
 
 def _env_dir(env: Mapping[str, str], key: str, windows: bool = False) -> Path | None:

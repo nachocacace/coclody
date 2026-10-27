@@ -7,7 +7,7 @@ import pytest
 from keyring.backend import KeyringBackend
 from keyring.errors import KeyringError, PasswordDeleteError
 
-from coclody.secrets import (
+from coclody.credentials import (
     SERVICE,
     MissingSecretError,
     SecretError,

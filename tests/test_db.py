@@ -324,3 +324,98 @@ def test_finish_run_rules(conn):
         repo.set_run_session(conn, r.id, "tarde")
     with pytest.raises(NotFoundError):
         repo.finish_run(conn, 9999, "ok")
+
+
+# --- task_events ----------------------------------------------------------------
+
+
+def test_transitions_log_status_events(conn):
+    t = repo.create_task(conn, "x")
+    repo.transition_task(conn, t.id, "queued")
+    repo.transition_task(conn, t.id, "running")
+    events = repo.list_events(conn, t.id)
+    assert [(e.kind, e.message) for e in events] == [
+        ("status_change", "pending → queued"),
+        ("status_change", "queued → running"),
+    ]
+
+
+def test_failed_transition_logs_nothing(conn):
+    t = repo.create_task(conn, "x")
+    with pytest.raises(InvalidTransitionError):
+        repo.transition_task(conn, t.id, "done")
+    assert repo.list_events(conn, t.id) == []
+
+
+def test_add_and_list_events(conn):
+    t = repo.create_task(conn, "x")
+    repo.transition_task(conn, t.id, "queued")
+    run_task = repo.transition_task(conn, t.id, "running")
+    run = repo.start_run(conn, run_task.id)
+    e1 = repo.add_event(conn, t.id, "progress", "  leyendo archivos  ", run_id=run.id)
+    e2 = repo.add_event(conn, t.id, "error", "algo salió mal")
+    assert (e1.kind, e1.message, e1.run_id, e1.notified) == ("progress", "leyendo archivos", run.id, 0)
+    all_events = repo.list_events(conn, t.id)
+    assert [e.id for e in all_events][-2:] == [e1.id, e2.id]
+    assert repo.list_events(conn, t.id, after_id=e1.id) == [e2]
+    assert len(repo.list_events(conn, t.id, limit=1)) == 1
+
+
+def test_event_validation(conn):
+    t = repo.create_task(conn, "x")
+    other = repo.create_task(conn, "otra")
+    repo.transition_task(conn, other.id, "queued")
+    repo.transition_task(conn, other.id, "running")
+    other_run = repo.start_run(conn, other.id)
+    with pytest.raises(ValidationError):
+        repo.add_event(conn, t.id, "inventado", "m")
+    with pytest.raises(ValidationError):
+        repo.add_event(conn, t.id, "progress", "   ")
+    with pytest.raises(ValidationError):
+        repo.add_event(conn, t.id, "progress", None)
+    with pytest.raises(NotFoundError):
+        repo.add_event(conn, 9999, "progress", "m")
+    with pytest.raises(NotFoundError):
+        repo.add_event(conn, t.id, "progress", "m", run_id=9999)
+    with pytest.raises(ValidationError, match="no pertenece"):
+        repo.add_event(conn, t.id, "progress", "m", run_id=other_run.id)
+
+
+def test_long_event_message_is_truncated(conn):
+    t = repo.create_task(conn, "x")
+    e = repo.add_event(conn, t.id, "progress", "z" * 10_000)
+    assert len(e.message) == repo.EVENT_MAX_LEN and e.message.endswith("…")
+
+
+def test_notifications_flow(conn):
+    t = repo.create_task(conn, "x")
+    repo.transition_task(conn, t.id, "queued")
+    e = repo.add_event(conn, t.id, "progress", "p")
+    pending = repo.pending_notifications(conn)
+    assert [p.kind for p in pending] == ["status_change", "progress"]
+    assert repo.mark_notified(conn, [p.id for p in pending] + [p.id for p in pending]) == 2
+    assert repo.mark_notified(conn, [e.id]) == 0
+    assert repo.mark_notified(conn, []) == 0
+    assert repo.pending_notifications(conn) == []
+    assert all(ev.notified == 1 for ev in repo.list_events(conn, t.id))
+
+
+def test_mark_notified_many_ids(conn):
+    t = repo.create_task(conn, "x")
+    ids = [repo.add_event(conn, t.id, "progress", f"p{i}").id for i in range(1200)]
+    assert repo.mark_notified(conn, ids) == 1200
+    assert repo.pending_notifications(conn) == []
+
+
+@pytest.mark.parametrize("bad", [[0], [-1], ["1"], [True], [1.0]])
+def test_mark_notified_validates_ids(conn, bad):
+    with pytest.raises(ValidationError):
+        repo.mark_notified(conn, bad)
+
+
+def test_events_are_deleted_with_task(conn):
+    t = repo.create_task(conn, "x")
+    repo.add_event(conn, t.id, "progress", "p")
+    repo.transition_task(conn, t.id, "cancelled")
+    repo.delete_task(conn, t.id)
+    assert conn.execute("SELECT count(*) FROM task_events").fetchone()[0] == 0

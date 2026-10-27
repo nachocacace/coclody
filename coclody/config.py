@@ -20,7 +20,8 @@ from typing import Any
 from coclody.paths import AppPaths
 
 DEFAULT_ALLOWED_TOOLS = ("Read", "Glob", "Grep", "Edit", "Write")
-_TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\([^()\r\n]*\))?$")
+# Sin comas: --allowedTools las usa como separador.
+_TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\([^(),\r\n]*\))?$")
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _REQUIRED = object()
 
@@ -138,6 +139,14 @@ def load_config(paths: AppPaths, path: Path | None = None) -> Config:
     )
 
 
+def is_valid_tool_spec(spec: object) -> bool:
+    """Nombre de herramienta de Claude Code, opcionalmente acotado: ``Read``, ``Bash(git status:*)``.
+
+    ``Bash`` sin acotar no es válido. Lo usan la config y el runner.
+    """
+    return isinstance(spec, str) and bool(_TOOL_RE.fullmatch(spec)) and spec != "Bash"
+
+
 def write_template(path: Path) -> None:
     """Crea config.toml con la plantilla. Nunca sobreescribe uno existente."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -245,15 +254,15 @@ def _executable(value: Any) -> str:
 def _tools(value: Any) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(t, str) for t in value):
         raise _Invalid("tiene que ser una lista de nombres de herramientas")
-    bad = [t for t in value if not _TOOL_RE.match(t)]
-    if bad:
-        raise _Invalid(f"nombres inválidos: {', '.join(map(repr, bad))}")
     if "Bash" in value:
         raise _Invalid('"Bash" sin restricción no está permitido; usá la forma acotada, p. ej. "Bash(git status:*)"')
+    bad = [t for t in value if not is_valid_tool_spec(t)]
+    if bad:
+        raise _Invalid(f"nombres inválidos: {', '.join(map(repr, bad))}")
     return value
 
 
 def _repo(value: Any) -> str:
-    if not isinstance(value, str) or not _REPO_RE.match(value):
+    if not isinstance(value, str) or not _REPO_RE.fullmatch(value):
         raise _Invalid('tiene que tener el formato "usuario/repo"')
     return value

@@ -6,10 +6,6 @@ el descubrimiento usa entry points que PyInstaller puede no empaquetar, y
 además podría elegir un backend inesperado (p. ej. uno en texto plano).
 
 Los valores nunca se loguean ni aparecen en mensajes de error.
-
-Nota: este módulo es ``coclody.secrets``. No tapa al ``secrets`` de la
-biblioteca estándar mientras la carpeta ``coclody/`` no esté en sys.path;
-por eso el punto de entrada de PyInstaller tiene que vivir fuera del paquete.
 """
 
 from __future__ import annotations
