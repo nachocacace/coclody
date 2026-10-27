@@ -44,6 +44,9 @@ executable = "claude"
 # "Bash" sin restricción no está permitido; usá la forma acotada, p. ej. "Bash(git status:*)".
 allowed_tools = ["Read", "Glob", "Grep", "Edit", "Write"]
 timeout_minutes = 60
+# Límite de salida que se guarda por ejecución (el resto se descarta).
+max_stdout_bytes = 2000000
+max_stderr_bytes = 200000
 
 [updates]
 enabled = false
@@ -72,6 +75,8 @@ class ClaudeConfig:
     executable: str
     allowed_tools: tuple[str, ...]
     timeout_minutes: int
+    max_stdout_bytes: int = 2_000_000
+    max_stderr_bytes: int = 200_000
 
 
 @dataclass(frozen=True)
@@ -90,7 +95,14 @@ class Config:
 
 _SCHEMA = {
     "telegram": {"allowed_chat_ids"},
-    "claude": {"workspace_root", "executable", "allowed_tools", "timeout_minutes"},
+    "claude": {
+        "workspace_root",
+        "executable",
+        "allowed_tools",
+        "timeout_minutes",
+        "max_stdout_bytes",
+        "max_stderr_bytes",
+    },
     "updates": {"enabled", "github_repo", "check_interval_hours"},
 }
 
@@ -119,6 +131,8 @@ def load_config(paths: AppPaths, path: Path | None = None) -> Config:
     executable = v.get(cl, "claude.executable", _executable, default="claude")
     tools = v.get(cl, "claude.allowed_tools", _tools, default=list(DEFAULT_ALLOWED_TOOLS))
     timeout = v.get(cl, "claude.timeout_minutes", _int_between(1, 24 * 60), default=60)
+    max_stdout = v.get(cl, "claude.max_stdout_bytes", _int_between(64 * 1024, 50_000_000), default=2_000_000)
+    max_stderr = v.get(cl, "claude.max_stderr_bytes", _int_between(4 * 1024, 10_000_000), default=200_000)
     enabled = v.get(up, "updates.enabled", _bool, default=False)
     repo = v.get(up, "updates.github_repo", _repo, default=None)
     interval = v.get(up, "updates.check_interval_hours", _int_between(1, 24 * 30), default=24)
@@ -134,6 +148,8 @@ def load_config(paths: AppPaths, path: Path | None = None) -> Config:
             executable=executable,
             allowed_tools=tuple(tools),
             timeout_minutes=timeout,
+            max_stdout_bytes=max_stdout,
+            max_stderr_bytes=max_stderr,
         ),
         updates=UpdatesConfig(enabled=enabled, github_repo=repo, check_interval_hours=interval),
     )

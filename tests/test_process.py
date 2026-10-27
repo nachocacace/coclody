@@ -107,6 +107,22 @@ def test_orphan_holding_pipes_is_killed_after_normal_exit(tmp_path):
     assert wait_dead(int(pidfile.read_text()))
 
 
+@posix_only
+def test_orphan_without_pipes_is_killed_after_normal_exit(tmp_path):
+    # Un proceso en segundo plano que no hereda los pipes igual muere al terminar.
+    code = GRANDCHILD.replace(
+        'subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])',
+        'subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.DEVNULL, '
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+    ).format(after="print('listo')")
+    pidfile = tmp_path / "pid"
+    started = time.monotonic()
+    r = run(code, str(pidfile), tmp_path=tmp_path, timeout=30)
+    assert r.exit_code == 0 and b"listo" in r.stdout
+    assert time.monotonic() - started < 5
+    assert wait_dead(int(pidfile.read_text()))
+
+
 def test_cancel(tmp_path):
     cancel = threading.Event()
     threading.Timer(0.5, cancel.set).start()

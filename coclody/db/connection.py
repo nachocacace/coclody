@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 
 MIN_SQLITE = (3, 37, 0)  # tablas STRICT
@@ -28,6 +28,27 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 5000")
     return conn
+
+
+DbFactory = Callable[[], AbstractContextManager[sqlite3.Connection]]
+
+
+def connection_factory(path: Path) -> DbFactory:
+    """Fábrica de conexiones de corta vida.
+
+    Cada uso abre y cierra su propia conexión: así el bot (event loop) y el
+    worker (hilo aparte) nunca comparten una conexión entre hilos.
+    """
+
+    @contextmanager
+    def factory() -> Iterator[sqlite3.Connection]:
+        conn = connect(path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    return factory
 
 
 @contextmanager

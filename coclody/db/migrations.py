@@ -74,8 +74,24 @@ CREATE INDEX idx_events_task      ON task_events(task_id);
 CREATE INDEX idx_events_pending   ON task_events(notified) WHERE notified = 0;
 """
 
+# v2:
+# - Solo algunos eventos se notifican por Telegram (los cambios a done, failed
+#   y waiting_input). El resto queda como historial en la base.
+# - Los message_id de Telegram son únicos por chat, no globales: la pregunta se
+#   identifica por (tg_chat_id, tg_message_id).
+_V2 = """
+ALTER TABLE task_events ADD COLUMN notify INTEGER NOT NULL DEFAULT 0 CHECK (notify IN (0, 1));
+DROP INDEX idx_events_pending;
+CREATE INDEX idx_events_pending ON task_events(id) WHERE notify = 1 AND notified = 0;
+
+ALTER TABLE questions ADD COLUMN tg_chat_id INTEGER;
+DROP INDEX idx_questions_tg_message;
+CREATE UNIQUE INDEX idx_questions_tg_message ON questions(tg_chat_id, tg_message_id)
+    WHERE tg_message_id IS NOT NULL;
+"""
+
 # Orden estricto: la migración N lleva la base de user_version N-1 a N.
-MIGRATIONS: tuple[str, ...] = (_V1,)
+MIGRATIONS: tuple[str, ...] = (_V1, _V2)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

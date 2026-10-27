@@ -34,6 +34,8 @@ TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
 EDITABLE_STATUSES = frozenset({"pending", "waiting_input", "queued"})
 RUN_END_STATUSES = frozenset({"ok", "error", "timeout", "killed"})
 EVENT_KINDS = frozenset({"status_change", "progress", "question", "error"})
+# Solo estos cambios de estado se notifican por Telegram.
+NOTIFY_STATUSES = frozenset({"done", "failed", "waiting_input"})
 EVENT_MAX_LEN = 4000
 
 
@@ -78,6 +80,7 @@ class Question:
     asked_at: str
     answered_at: str | None
     answered_by: int | None
+    tg_chat_id: int | None
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,7 @@ class TaskEvent:
     message: str
     created_at: str
     notified: int
+    notify: int
 
 
 # --- tasks --------------------------------------------------------------------
@@ -213,7 +217,9 @@ def transition_task(
             f"UPDATE tasks SET status = ?, updated_at = datetime('now'), finished_at = {finished} WHERE id = ?",
             (new_status, task.id),
         )
-        _insert_event(conn, task.id, None, "status_change", f"{task.status} → {new_status}")
+        _insert_event(
+            conn, task.id, None, "status_change", f"{task.status} → {new_status}", notify=new_status in NOTIFY_STATUSES
+        )
         return _get(conn, Task, "tasks", task.id)
 
 
@@ -246,14 +252,17 @@ def ask_question(conn: sqlite3.Connection, task_id: int, question: str) -> Quest
         return _get(conn, Question, "questions", cur.lastrowid)
 
 
-def set_question_message(conn: sqlite3.Connection, question_id: int, tg_message_id: int) -> Question:
+def set_question_message(conn: sqlite3.Connection, question_id: int, tg_chat_id: int, tg_message_id: int) -> Question:
     """Asocia la pregunta con el mensaje de Telegram que la envió (una sola vez)."""
+    chat_id = _int(tg_chat_id, "tg_chat_id", 1, 2**53)
     message_id = _int(tg_message_id, "tg_message_id", 1, 2**53)
     with transaction(conn):
         q = _get(conn, Question, "questions", question_id)
         if q.tg_message_id is not None:
             raise InvalidTransitionError(f"la pregunta {q.id} ya tiene mensaje asociado")
-        conn.execute("UPDATE questions SET tg_message_id = ? WHERE id = ?", (message_id, q.id))
+        conn.execute(
+            "UPDATE questions SET tg_chat_id = ?, tg_message_id = ? WHERE id = ?", (chat_id, message_id, q.id)
+        )
         return _get(conn, Question, "questions", q.id)
 
 
@@ -285,9 +294,22 @@ def get_question(conn: sqlite3.Connection, question_id: int) -> Question | None:
     return _find(conn, Question, "questions", question_id)
 
 
-def get_question_by_message(conn: sqlite3.Connection, tg_message_id: int) -> Question | None:
-    row = conn.execute("SELECT * FROM questions WHERE tg_message_id = ?", (tg_message_id,)).fetchone()
+def get_question_by_message(conn: sqlite3.Connection, tg_chat_id: int, tg_message_id: int) -> Question | None:
+    row = conn.execute(
+        "SELECT * FROM questions WHERE tg_chat_id = ? AND tg_message_id = ?", (tg_chat_id, tg_message_id)
+    ).fetchone()
     return Question(**dict(row)) if row else None
+
+
+def list_questions(conn: sqlite3.Connection, task_id: int, status: str | None = None) -> list[Question]:
+    """Preguntas de una tarea en orden, opcionalmente filtradas por estado."""
+    if status is None:
+        rows = conn.execute("SELECT * FROM questions WHERE task_id = ? ORDER BY id", (task_id,))
+    elif status in ("open", "answered", "expired"):
+        rows = conn.execute("SELECT * FROM questions WHERE task_id = ? AND status = ? ORDER BY id", (task_id, status))
+    else:
+        raise ValidationError(f"estado de pregunta inválido: {status!r}")
+    return [Question(**dict(row)) for row in rows]
 
 
 def list_open_questions(conn: sqlite3.Connection, task_id: int | None = None) -> list[Question]:
@@ -369,7 +391,7 @@ def list_active_runs(conn: sqlite3.Connection) -> list[Run]:
 def add_event(
     conn: sqlite3.Connection, task_id: int, kind: str, message: str, run_id: int | None = None
 ) -> TaskEvent:
-    """Agrega un evento al feed de la tarea.
+    """Agrega un evento al feed de la tarea. Estos eventos no se notifican por Telegram.
 
     Los mensajes largos se truncan (no se rechazan): suelen venir de la salida
     de Claude Code y perder el evento entero sería peor que recortarlo.
@@ -400,9 +422,10 @@ def list_events(
 
 
 def pending_notifications(conn: sqlite3.Connection, limit: int = 20) -> list[TaskEvent]:
-    """Eventos todavía no enviados por Telegram, del más viejo al más nuevo."""
+    """Eventos a notificar todavía no enviados, del más viejo al más nuevo."""
     rows = conn.execute(
-        "SELECT * FROM task_events WHERE notified = 0 ORDER BY id LIMIT ?", (_int(limit, "limit", 1, 1000),)
+        "SELECT * FROM task_events WHERE notify = 1 AND notified = 0 ORDER BY id LIMIT ?",
+        (_int(limit, "limit", 1, 1000),),
     )
     return [TaskEvent(**dict(row)) for row in rows]
 
@@ -417,18 +440,22 @@ def mark_notified(conn: sqlite3.Connection, event_ids: Iterable[int]) -> int:
         for start in range(0, len(ids), 500):  # bajo el límite de parámetros de SQLite
             chunk = ids[start : start + 500]
             marks = ", ".join("?" * len(chunk))
-            cur = conn.execute(f"UPDATE task_events SET notified = 1 WHERE notified = 0 AND id IN ({marks})", chunk)
+            cur = conn.execute(
+                f"UPDATE task_events SET notified = 1 WHERE notify = 1 AND notified = 0 AND id IN ({marks})", chunk
+            )
             changed += cur.rowcount
     return changed
 
 
-def _insert_event(conn: sqlite3.Connection, task_id: int, run_id: int | None, kind: str, message: str) -> int:
+def _insert_event(
+    conn: sqlite3.Connection, task_id: int, run_id: int | None, kind: str, message: str, notify: bool = False
+) -> int:
     message = message.strip()
     if len(message) > EVENT_MAX_LEN:
         message = message[: EVENT_MAX_LEN - 1] + "…"
     cur = conn.execute(
-        "INSERT INTO task_events (task_id, run_id, kind, message) VALUES (?, ?, ?, ?)",
-        (task_id, run_id, kind, message),
+        "INSERT INTO task_events (task_id, run_id, kind, message, notify) VALUES (?, ?, ?, ?, ?)",
+        (task_id, run_id, kind, message, int(notify)),
     )
     return cur.lastrowid
 

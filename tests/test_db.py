@@ -227,8 +227,9 @@ def test_question_flow(conn):
     t = repo.create_task(conn, "x")
     q = repo.ask_question(conn, t.id, "¿Qué base uso?")
     assert q.status == "open" and q.answer is None
-    q = repo.set_question_message(conn, q.id, 555)
-    assert repo.get_question_by_message(conn, 555) == q
+    q = repo.set_question_message(conn, q.id, 111, 555)
+    assert repo.get_question_by_message(conn, 111, 555) == q
+    assert repo.get_question_by_message(conn, 222, 555) is None  # mismo message_id, otro chat
     assert repo.list_open_questions(conn) == [q]
     assert repo.list_open_questions(conn, task_id=t.id) == [q]
     a = repo.answer_question(conn, q.id, "Postgres", answered_by=111)
@@ -239,15 +240,19 @@ def test_question_flow(conn):
         repo.answer_question(conn, q.id, "otra", answered_by=111)
 
 
-def test_question_message_set_once_and_unique(conn):
+def test_question_message_set_once_and_unique_per_chat(conn):
     t = repo.create_task(conn, "x")
     q1 = repo.ask_question(conn, t.id, "a")
     q2 = repo.ask_question(conn, t.id, "b")
-    repo.set_question_message(conn, q1.id, 10)
+    q3 = repo.ask_question(conn, t.id, "c")
+    repo.set_question_message(conn, q1.id, 111, 10)
     with pytest.raises(InvalidTransitionError):
-        repo.set_question_message(conn, q1.id, 11)
+        repo.set_question_message(conn, q1.id, 111, 11)
     with pytest.raises(sqlite3.IntegrityError):
-        repo.set_question_message(conn, q2.id, 10)
+        repo.set_question_message(conn, q2.id, 111, 10)
+    repo.set_question_message(conn, q3.id, 222, 10)  # otro chat: válido
+    with pytest.raises(ValidationError):
+        repo.set_question_message(conn, q2.id, 0, 12)
 
 
 def test_expire_question(conn):
@@ -387,24 +392,64 @@ def test_long_event_message_is_truncated(conn):
     assert len(e.message) == repo.EVENT_MAX_LEN and e.message.endswith("…")
 
 
+def test_only_done_failed_waiting_input_are_notified(conn):
+    a = repo.create_task(conn, "a")
+    for status in ("queued", "running", "waiting_input", "queued", "running", "failed", "queued", "running", "done"):
+        repo.transition_task(conn, a.id, status)
+    b = repo.create_task(conn, "b")
+    repo.transition_task(conn, b.id, "cancelled")
+    repo.add_event(conn, a.id, "error", "un error suelto")
+    repo.add_event(conn, a.id, "progress", "avance")
+    pending = repo.pending_notifications(conn)
+    assert [p.message for p in pending] == ["running → waiting_input", "running → failed", "running → done"]
+    assert all(p.task_id == a.id and p.notify == 1 for p in pending)
+    # El resto queda en la base como historial.
+    assert len(repo.list_events(conn, a.id)) == 11
+
+
 def test_notifications_flow(conn):
     t = repo.create_task(conn, "x")
     repo.transition_task(conn, t.id, "queued")
-    e = repo.add_event(conn, t.id, "progress", "p")
-    pending = repo.pending_notifications(conn)
-    assert [p.kind for p in pending] == ["status_change", "progress"]
-    assert repo.mark_notified(conn, [p.id for p in pending] + [p.id for p in pending]) == 2
-    assert repo.mark_notified(conn, [e.id]) == 0
+    repo.transition_task(conn, t.id, "running")
+    done = repo.transition_task(conn, t.id, "done")
+    (pending,) = repo.pending_notifications(conn)
+    progress = repo.add_event(conn, t.id, "progress", "p")
+    assert repo.mark_notified(conn, [pending.id, pending.id]) == 1
+    assert repo.mark_notified(conn, [pending.id]) == 0
+    assert repo.mark_notified(conn, [progress.id]) == 0  # no notificable: no cambia
     assert repo.mark_notified(conn, []) == 0
     assert repo.pending_notifications(conn) == []
-    assert all(ev.notified == 1 for ev in repo.list_events(conn, t.id))
+    assert done.status == "done"
 
 
 def test_mark_notified_many_ids(conn):
     t = repo.create_task(conn, "x")
-    ids = [repo.add_event(conn, t.id, "progress", f"p{i}").id for i in range(1200)]
+    conn.executemany(
+        "INSERT INTO task_events (task_id, kind, message, notify) VALUES (?, 'status_change', 'm', 1)",
+        [(t.id,)] * 1200,
+    )
+    ids = [e.id for e in repo.pending_notifications(conn, limit=1000)]
+    ids += [e.id for e in repo.list_events(conn, t.id, after_id=ids[-1], limit=1000)]
+    assert len(ids) == 1200
     assert repo.mark_notified(conn, ids) == 1200
     assert repo.pending_notifications(conn) == []
+
+
+def test_migration_v1_to_v2_keeps_data(app_paths):
+    from coclody.db import migrations
+
+    c = connect(app_paths.db_file)
+    with transaction(c):
+        for statement in migrations._split(migrations.MIGRATIONS[0]):
+            c.execute(statement)
+        c.execute("PRAGMA user_version = 1")
+    c.execute("INSERT INTO tasks (title) VALUES ('vieja')")
+    c.execute("INSERT INTO task_events (task_id, kind, message) VALUES (1, 'progress', 'antes')")
+    assert migrate(c) == 2
+    (event,) = repo.list_events(c, 1)
+    assert (event.message, event.notify, event.notified) == ("antes", 0, 0)
+    assert repo.pending_notifications(c) == []
+    c.close()
 
 
 @pytest.mark.parametrize("bad", [[0], [-1], ["1"], [True], [1.0]])

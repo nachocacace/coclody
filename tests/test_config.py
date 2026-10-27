@@ -50,6 +50,7 @@ def test_minimal_config_gets_defaults(app_paths, workspace):
     assert cfg.claude.executable == "claude"
     assert cfg.claude.allowed_tools == DEFAULT_ALLOWED_TOOLS
     assert cfg.claude.timeout_minutes == 60
+    assert (cfg.claude.max_stdout_bytes, cfg.claude.max_stderr_bytes) == (2_000_000, 200_000)
     assert cfg.updates.enabled is False
     assert cfg.updates.github_repo is None
     assert cfg.updates.check_interval_hours == 24
@@ -115,6 +116,21 @@ def test_timeout_range_and_type(app_paths, workspace, value):
     rendered = {True: "true", "10": '"10"'}.get(value, str(value))
     write(app_paths, minimal(workspace) + f"timeout_minutes = {rendered}\n")
     assert problems(app_paths)[0].startswith("claude.timeout_minutes:")
+
+
+def test_output_limits(app_paths, workspace):
+    write(app_paths, minimal(workspace) + "max_stdout_bytes = 100000\nmax_stderr_bytes = 5000\n")
+    cfg = load_config(app_paths)
+    assert (cfg.claude.max_stdout_bytes, cfg.claude.max_stderr_bytes) == (100_000, 5000)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("max_stdout_bytes", "1000"), ("max_stdout_bytes", "60000000"), ("max_stderr_bytes", "100"), ("max_stderr_bytes", '"5000"')],
+)
+def test_output_limits_range(app_paths, workspace, key, value):
+    write(app_paths, minimal(workspace) + f"{key} = {value}\n")
+    assert problems(app_paths)[0].startswith(f"claude.{key}:")
 
 
 def test_workspace_must_exist(app_paths, tmp_path):

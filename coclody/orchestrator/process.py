@@ -3,10 +3,13 @@
 - Siempre lista de argumentos y ``shell=False``. ``argv[0]`` tiene que ser absoluto.
 - stdout y stderr se leen en hilos hasta el final (para que el proceso nunca
   se bloquee con el pipe lleno), pero solo se guardan los primeros N bytes.
-- Al vencer el timeout o cancelar se mata el árbol completo, no solo el
-  proceso hijo: Claude Code lanza subprocesos (shells, node, etc.).
-  - POSIX: el hijo arranca en su propia sesión (``start_new_session``) y se
-    manda SIGTERM y luego SIGKILL a todo el grupo.
+- Al terminar, siempre (salida normal, timeout o cancelación) se mata lo que
+  quede del árbol: Claude Code lanza subprocesos (shells, node, etc.).
+  - POSIX: el hijo arranca en su propia sesión (``start_new_session``). Se
+    espera su salida con ``waitid(WNOWAIT)``, que no lo cosecha: mientras el
+    líder es un zombie su ID de grupo no se puede reutilizar, así que el
+    ``killpg`` final nunca le pega a un grupo ajeno. Si hubo timeout o
+    cancelación se manda SIGTERM, se dan unos segundos y luego SIGKILL.
   - Windows: el hijo se asigna a un Job Object con KILL_ON_JOB_CLOSE (vía
     ctypes, sin comandos externos); terminar el job mata a todos sus
     procesos. Limitación: un subproceso lanzado en los primeros instantes,
@@ -126,30 +129,19 @@ def run_bounded(
     timed_out = cancelled = False
     deadline = started + timeout_s
     try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+        while not _has_exited(proc):
+            if time.monotonic() >= deadline:
                 timed_out = True
                 break
-            try:
-                proc.wait(timeout=min(poll_interval_s, remaining))
-                break
-            except subprocess.TimeoutExpired:
-                pass
             if cancel is not None and cancel.is_set():
                 cancelled = True
                 break
+            time.sleep(poll_interval_s)
     finally:
-        if proc.poll() is None:
-            _kill_tree(proc, job)
-        proc.wait()
-        # Si quedaron nietos con los pipes abiertos, los lectores no terminan: se mata el resto.
-        threads[0].join(_READER_JOIN_S if not (timed_out or cancelled) else 0.5)
+        _kill_tree(proc, job, graceful=not _has_exited(proc))
+        proc.wait()  # recién acá se cosecha al líder
         if job is not None:
-            job.terminate()
             job.close()
-        elif threads[0].is_alive() or threads[1].is_alive():
-            _killpg(proc.pid, signal.SIGKILL)
         for t in threads:
             t.join(_READER_JOIN_S)
 
@@ -177,15 +169,26 @@ def _feed(stream: IO[bytes], data: bytes) -> None:
             pass
 
 
-def _kill_tree(proc: subprocess.Popen, job: _WindowsJob | None) -> None:
+def _has_exited(proc: subprocess.Popen) -> bool:
+    """True si el proceso terminó. En POSIX no lo cosecha (ver docstring del módulo)."""
+    if os.name != "posix":
+        return proc.poll() is not None
+    try:
+        return os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:
+        return True
+
+
+def _kill_tree(proc: subprocess.Popen, job: _WindowsJob | None, graceful: bool) -> None:
+    """Mata todo el árbol. Con ``graceful`` primero pide terminar (solo POSIX)."""
     if job is not None:
         job.terminate()
         return
-    _killpg(proc.pid, signal.SIGTERM)
-    try:
-        proc.wait(timeout=_TERM_GRACE_S)
-    except subprocess.TimeoutExpired:
-        pass
+    if graceful:
+        _killpg(proc.pid, signal.SIGTERM)
+        end = time.monotonic() + _TERM_GRACE_S
+        while not _has_exited(proc) and time.monotonic() < end:
+            time.sleep(0.05)
     _killpg(proc.pid, signal.SIGKILL)
 
 

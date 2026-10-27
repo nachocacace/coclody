@@ -15,9 +15,9 @@ Defensas contra que Claude Code haga más de lo configurado:
 - ``--permission-mode dontAsk`` y ``--permission-prompts none``: lo que no
   esté preaprobado se deniega, nadie lo aprueba.
 - ``--strict-mcp-config`` sin ``--mcp-config``: ningún servidor MCP.
-- ``--setting-sources user``: no se cargan los settings del proyecto ni los
-  locales, que vienen dentro de la carpeta de trabajo y podrían traer hooks
-  o permisos.
+- ``--setting-sources ""``: no se carga ningún settings.json (ni los del
+  proyecto, que vienen dentro de la carpeta de trabajo y podrían traer hooks o
+  permisos, ni los personales del usuario). CoClody depende solo de su config.
 - Del entorno se quitan las variables que harían usar una API paga
   (``ANTHROPIC_*``, ``CLAUDE_CODE_USE_*``) y las de CoClody.
 """
@@ -37,8 +37,6 @@ from coclody.orchestrator.process import run_bounded
 from coclody.orchestrator.sandbox import SandboxError, resolve_executable, resolve_workdir
 
 MAX_PROMPT_CHARS = 100_000
-MAX_STDOUT_BYTES = 2_000_000
-MAX_STDERR_BYTES = 200_000
 SUMMARY_MAX_CHARS = 10_000
 STDERR_TAIL_CHARS = 2_000
 
@@ -54,6 +52,8 @@ class Invocation:
     env: Mapping[str, str]
     stdin: bytes
     timeout_s: float
+    max_stdout_bytes: int
+    max_stderr_bytes: int
 
 
 @dataclass(frozen=True)
@@ -92,7 +92,7 @@ def build_invocation(
         "--permission-mode", "dontAsk",
         "--permission-prompts", "none",
         "--strict-mcp-config",
-        "--setting-sources", "user",
+        "--setting-sources", "",
         "--tools", ",".join(base_names),  # "" deshabilita todas
     ]
     if tools:
@@ -116,6 +116,8 @@ def build_invocation(
         env=_child_env(os.environ if base_env is None else base_env),
         stdin=text.encode("utf-8"),
         timeout_s=cfg.timeout_minutes * 60,
+        max_stdout_bytes=cfg.max_stdout_bytes,
+        max_stderr_bytes=cfg.max_stderr_bytes,
     )
 
 
@@ -126,8 +128,8 @@ def run_claude(inv: Invocation, cancel: threading.Event | None = None) -> Claude
         env=inv.env,
         stdin_data=inv.stdin,
         timeout_s=inv.timeout_s,
-        max_stdout=MAX_STDOUT_BYTES,
-        max_stderr=MAX_STDERR_BYTES,
+        max_stdout=inv.max_stdout_bytes,
+        max_stderr=inv.max_stderr_bytes,
         cancel=cancel,
     )
     stderr_tail = proc.stderr.decode("utf-8", errors="replace")[-STDERR_TAIL_CHARS:].strip()
@@ -144,7 +146,7 @@ def run_claude(inv: Invocation, cancel: threading.Event | None = None) -> Claude
     elif proc.cancelled:
         status, summary = "killed", "Cancelada."
     elif proc.stdout_truncated:
-        status, summary = "error", f"La salida superó {MAX_STDOUT_BYTES} bytes y se descartó."
+        status, summary = "error", f"La salida superó {inv.max_stdout_bytes} bytes y se descartó."
     elif parsed is None:
         status, summary = "error", "La salida de Claude Code no es el JSON esperado."
     elif proc.exit_code != 0 or parsed.get("is_error") is not False:

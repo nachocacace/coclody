@@ -86,13 +86,14 @@ def test_argv_flags(ws, fake_claude):
         "--permission-mode", "dontAsk",
         "--permission-prompts", "none",
         "--strict-mcp-config",
-        "--setting-sources", "user",
+        "--setting-sources", "",
         "--tools", "Read,Edit,Bash",
         "--allowedTools", "Read,Edit,Bash(git status:*)",
     )
     assert inv.cwd == (ws / "proj").resolve()
     assert inv.stdin == "hacé algo".encode()
     assert inv.timeout_s == 60
+    assert (inv.max_stdout_bytes, inv.max_stderr_bytes) == (2_000_000, 200_000)
     assert "--dangerously-skip-permissions" not in inv.argv
     assert "bypassPermissions" not in inv.argv
 
@@ -256,6 +257,14 @@ def test_run_huge_output(ws, fake_claude, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "huge")
     result = run_claude(build_invocation(cfg(ws, fake_claude), "x"))
     assert result.status == "error" and result.stdout_truncated
+    assert "2000000 bytes" in result.summary
+
+
+def test_output_limit_comes_from_config(ws, fake_claude, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ok")
+    small = dataclasses.replace(cfg(ws, fake_claude), max_stdout_bytes=100)
+    result = run_claude(build_invocation(small, "x"))
+    assert result.status == "error" and result.stdout_truncated and "100 bytes" in result.summary
 
 
 def test_run_timeout(ws, fake_claude, monkeypatch):
