@@ -30,7 +30,7 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 
 from coclody.db import DbFactory, repo
 from coclody.db.repo import Question, Run, Task, TaskEvent
-from coclody.telegram_bot.commands import STATUS_EMOJI, clip, no_autolink, task_title
+from coclody.telegram_bot.commands import STATUS_EMOJI, clip, no_autolink, outgoing, task_title
 from coclody.telegram_bot.keyboards import MAIN_KEYBOARD, question_buttons, task_buttons
 
 log = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ async def _deliver(bot: Bot, db: DbFactory, item: _Pending, recipients: list[int
             if (chat_id, part) in item.delivered:
                 continue
             try:
-                sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup or MAIN_KEYBOARD)
+                sent = await bot.send_message(chat_id=chat_id, text=outgoing(text), reply_markup=markup or MAIN_KEYBOARD)
             except (Forbidden, BadRequest) as exc:
                 log.warning("Telegram rechazó la notificación al chat %s: %s", chat_id, exc)
                 await asyncio.to_thread(_record, db, item.event.id, chat_id, part, "rejected", None)

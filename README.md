@@ -147,7 +147,7 @@ Para no escribir comandos desde el celular:
 - **Estados**: ⏳ en cola · ⚙️ ejecutando · ❓ esperando respuesta · ✅ terminada · ❌ falló · 🚫 cancelada. Son los mismos en `/lista`, `/estado` y los avisos.
 - **Preguntas**: toda pregunta trae **✖ Cancelar** para la tarea que pregunta. Si Claude la marca como de sí o no, trae además **Sí** y **No**. Igual podés responder con texto si querés aclarar algo.
 - Si tocás *Nueva tarea* y CoClody se reinicia antes de que mandes el título, tu respuesta igual crea la tarea.
-- Nada de lo que escribís vos ni de lo que escribe Claude se convierte en link (`README.md`, URLs, `@usuario`, `#etiqueta`, `/comando`): se ve igual, pero no se puede tocar. Los comandos que sugiere el propio bot (`/responder`, `/estado`…) sí se pueden tocar.
+- Nada de lo que escribís vos ni de lo que escribe Claude se convierte en link (`README.md`, URLs, `@usuario`, `#etiqueta`, `/comando`): se ve igual, pero no se puede tocar. Tampoco los comandos que sugiere el propio bot: escribilos o usá el botón **Menú**.
 - CoClody nunca te escribe primero, salvo para avisarte de tus tareas.
 
 ## Actualizaciones
@@ -155,7 +155,7 @@ Para no escribir comandos desde el celular:
 Si activaste el paso 7, CoClody busca una versión nueva una vez por día. Si encuentra una:
 
 1. Verifica que esté **firmada** por quien publica CoClody, que sea **más nueva** que la tuya y que el archivo descargado esté intacto. Si algo no cierra, no instala nada.
-2. La instala y te avisa por Telegram.
+2. La instala y lo anota en la ventana de CoClody y en `coclody.log` (no te escribe por Telegram: CoClody solo te escribe por tus tareas).
 3. **Se aplica la próxima vez que abras CoClody.** Cerralo y abrilo cuando quieras.
 
 Sin internet no pasa nada: sigue funcionando y lo intenta más tarde. Para buscar a mano:

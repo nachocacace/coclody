@@ -20,11 +20,10 @@ from coclody.config import ClaudeConfig, Config, TelegramConfig, UpdatesConfig
 from coclody.db import connection_factory, repo
 from coclody.orchestrator.worker import CancelRegistry, Worker
 from coclody.security import ChatGuard, close_security_log, configure_security_log
-from coclody.telegram_bot.app import Services, announce_update, build_application, setup_menu
+from coclody.telegram_bot.app import Services, build_application, setup_menu
 from coclody.telegram_bot.commands import STATUS_EMOJI, STATUS_LABELS, WORD_JOINER, Commands, label, no_autolink
 from coclody.telegram_bot.keyboards import BOT_COMMANDS, BUTTON_HELP, BUTTON_LIST, BUTTON_NEW
 from coclody.telegram_bot.notifier import flush_notifications
-from coclody.updater.client import UpdateResult
 from tests.fake_telegram import TOKEN, FakeTelegram, bot_message, callback_update, inline_data, markup, user_text
 
 ME, BRO = 6956605022, 7000000001
@@ -140,14 +139,11 @@ def test_every_plain_reply_carries_the_main_keyboard(env):
         for text in ("/ayuda", "/cancelar 99", "/responder", "hola", BUTTON_HELP):
             out += await process(app, fake, user_text(ME, text))
         out += await process(app, fake, callback_update(ME, f"t:r:{done.id}", message=bot_message(1, ME, "x")))
-        before = len(fake.sent())
-        await announce_update(app.bot, services, UpdateResult("available", "9.9.9", "Hay una versión nueva."))
-        out += fake.sent()[before:]
         await app.shutdown()
         return out
 
     sent = run(scenario())
-    assert len(sent) == 8  # 5 respuestas, el resultado del botón y el aviso a los dos chats
+    assert len(sent) == 6  # 5 respuestas y el resultado del botón
     assert all(is_main_keyboard(p) for p in sent), [p["text"][:40] for p in sent if not is_main_keyboard(p)]
 
 
@@ -262,7 +258,7 @@ def test_titles_are_escaped_everywhere_but_stored_as_is(env):
         repo.transition_task(conn, 1, "failed")
         await flush_notifications(app.bot, db, {ME})
         await app.shutdown()
-        return [p["text"] for p in created + listing + status] + [fake.sent()[-1]["text"]]
+        return [p["raw_text"] for p in created + listing + status] + [fake.sent()[-1]["raw_text"]]
 
     texts = run(scenario())
     escaped = no_autolink("Actualizar README.md")
@@ -276,8 +272,6 @@ def test_titles_are_escaped_everywhere_but_stored_as_is(env):
 # Aproximación a lo que Telegram linkea solo: dominios, URLs, menciones, hashtags con letras,
 # cashtags y comandos. "#12" (número de tarea) no es hashtag para Telegram: lleva letras.
 REAL_LINK = re.compile(r"[\w-]\.[A-Za-z]{2,}|://|@\w|#\w*[^\W\d]|\$[A-Z]{3,8}|(?<![\w/])/\w")
-# Los comandos que el propio bot sugiere ("mandá /responder 3 …") se dejan tocables a propósito.
-OWN_COMMANDS = re.compile(r"(?<![\w/])/(?:nueva|lista|estado|responder|cancelar|reintentar|ayuda|start)\b")
 LINKY = "README.md, https://example.com/x, @juan, #urgente, $USD y /borrar_todo"
 
 
@@ -299,13 +293,14 @@ def test_no_text_from_claude_or_the_user_is_linkable_anywhere(env):
         for text in ("/lista", f"/estado {done.id}", f"/estado {failed.id}", f"/estado {waiting.id}",
                      f"/nueva Nueva {LINKY}\nDescripción {LINKY}", "/estado 4", "/nueva " + "x" * 300):
             await process(app, fake, user_text(ME, text))
-        await announce_update(app.bot, services, UpdateResult("available", f"Versión 1.2.3 en {LINKY}", "1.2.3"))
         await app.shutdown()
-        return [p["text"] for p in fake.sent()]
+        return [p["raw_text"] for p in fake.sent()]
 
     texts = run(scenario())
-    assert len(texts) >= 10
-    offenders = [(m.group(0), t[:60]) for t in texts for m in REAL_LINK.finditer(OWN_COMMANDS.sub("", t))]
+    assert len(texts) >= 9
+    assert any("/\u2060responder" in t for t in texts)  # el comando sugerido está, pero no se puede tocar
+    # Nada linkeable, tampoco los comandos que sugiere el propio bot ("mandá /responder 3 …").
+    offenders = [(m.group(0), t[:60]) for t in texts for m in REAL_LINK.finditer(t)]
     assert offenders == []
     joined = "\n".join(texts).replace(WORD_JOINER, "")
     for piece in ("Resumen: ", "Error: ", "Avance: edité ", "¿Toco ", "Descripción ", "web.app"):
@@ -327,3 +322,22 @@ def test_coclody_never_writes_first(env):
     run(scenario())
     assert fake.sent() == []
     assert {name for name, _ in fake.calls} <= {"getMe", "setMyCommands", "setChatMenuButton"}
+
+
+def test_no_autolink_is_idempotent():
+    once = no_autolink(LINKY)
+    assert no_autolink(once) == once
+
+
+def test_help_and_command_hints_are_not_tappable(env):
+    _, _, _, fake, app = env
+
+    async def scenario():
+        await app.initialize()
+        out = await process(app, fake, user_text(ME, "/ayuda"))
+        out += await process(app, fake, user_text(ME, "/responder"))
+        await app.shutdown()
+        return [p["raw_text"] for p in out]
+
+    for text in run(scenario()):
+        assert REAL_LINK.search(text) is None, text

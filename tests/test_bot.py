@@ -524,27 +524,19 @@ def test_waiting_input_with_two_questions_resumes_partially(conn, db):
 # --- aviso de actualizaciones ---------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("status", "sent"), [("installed", True), ("available", True), ("up_to_date", False),
-                                               ("offline", False), ("error", False), ("disabled", False)])
-def test_announce_update_once_per_version(services, status, sent):
-    from coclody.telegram_bot.app import announce_update
+@pytest.mark.parametrize(("status", "logged"), [("installed", True), ("available", True), ("up_to_date", False),
+                                                 ("offline", False), ("error", False), ("disabled", False)])
+def test_update_is_logged_once_per_version_and_never_sent(services, status, logged, caplog):
+    from coclody.telegram_bot.app import report_update
     from coclody.updater.client import UpdateResult
 
     result = UpdateResult(status, "Se instaló la versión 0.2.0", "0.2.0")
-    fake = FakeTelegram()
-
-    async def go():
-        async with Bot(TOKEN, request=fake) as bot:
-            await announce_update(bot, services, result)
-            await announce_update(bot, services, result)  # segunda vez: no repite
-
-    run(go())
-    texts = fake.sent()
-    if sent:
-        assert sorted(m["chat_id"] for m in texts) == [ME, BRO]
-        assert all("0.2.0" in m["text"].replace("\u2060", "") for m in texts)  # se ve igual, sin autolink
-    else:
-        assert texts == []
+    with caplog.at_level(logging.WARNING):
+        report_update(services, result)
+        report_update(services, result)  # segunda vez: no repite
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Actualización:")]
+    assert lines == (["Actualización: Se instaló la versión 0.2.0"] if logged else [])
+    assert not hasattr(app_module, "announce_update")  # CoClody no escribe primero salvo avisos de tareas
 
 
 # --- el guard cierra ante un error ------------------------------------------------------------

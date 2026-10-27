@@ -47,7 +47,8 @@ WORD_JOINER = "\u2060"
 # (README.md, https://…), menciones (@x), hashtags (#x), cashtags ($X) y comandos (/x, que además
 # se podrían tocar y mandar). Un WORD JOINER (invisible, sin ancho) después de cada uno corta la
 # detección sin cambiar lo que se ve.
-_AUTOLINK_RE = re.compile(r"([.@#$/:])(?=\S)")
+# Idempotente: lo que ya tiene el WORD JOINER no se vuelve a tocar.
+_AUTOLINK_RE = re.compile(r"([.@#$/:])(?=[^\s\u2060])")
 
 HELP = """\
 CoClody: tareas para Claude Code.
@@ -69,6 +70,11 @@ _ID_RE = re.compile(r"#?([1-9][0-9]{0,15})")
 
 def clip(text: str, limit: int = TELEGRAM_MAX_CHARS) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def outgoing(text: str) -> str:
+    """Todo texto que sale al chat pasa por acá: sin autolinks (tampoco en los comandos sugeridos) y recortado."""
+    return clip(no_autolink(text))
 
 
 def parse_task_id(raw: str) -> int | None:

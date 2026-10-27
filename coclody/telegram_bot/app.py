@@ -67,7 +67,7 @@ from coclody.config import Config
 from coclody.db import DbFactory
 from coclody.orchestrator.worker import CANCEL_SHUTDOWN, Worker
 from coclody.security import ChatGuard
-from coclody.telegram_bot.commands import Commands, clip, no_autolink, parse_task_id
+from coclody.telegram_bot.commands import Commands, outgoing, parse_task_id
 from coclody.telegram_bot.keyboards import (
     BOT_COMMANDS,
     BUTTON_HELP,
@@ -250,7 +250,7 @@ async def _guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if notice:
         try:
-            await update.effective_message.reply_text(notice)
+            await update.effective_message.reply_text(outgoing(notice))
         except Exception:
             log.exception("No se pudo avisar que se ignoró un mensaje")
     raise ApplicationHandlerStop
@@ -292,7 +292,7 @@ def _reply_with(fn):
             return
         # Sin otros botones, va el teclado fijo: así sigue visible en cada respuesta.
         markup = reply.markup if reply.markup is not None else MAIN_KEYBOARD
-        sent = await update.effective_message.reply_text(clip(reply.text), reply_markup=markup)
+        sent = await update.effective_message.reply_text(outgoing(reply.text), reply_markup=markup)
         if reply.on_sent is not None:
             await asyncio.to_thread(reply.on_sent, sent)  # puede tocar la base
 
@@ -322,7 +322,7 @@ async def _on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await query.edit_message_reply_markup(reply_markup=None)
         except TelegramError as exc:
             log.warning("No se pudieron sacar los botones del mensaje: %s", exc)
-    await context.bot.send_message(chat_id=chat_id, text=clip(text), reply_markup=MAIN_KEYBOARD)
+    await context.bot.send_message(chat_id=chat_id, text=outgoing(text), reply_markup=MAIN_KEYBOARD)
 
 
 def replied_message_id(message, chat_id: int) -> int | None:
@@ -359,7 +359,7 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.error("Error procesando un update", exc_info=context.error)
     if isinstance(update, Update) and update.effective_message is not None and _permitted(update, context):
         try:
-            await update.effective_message.reply_text("Ocurrió un error interno. Quedó registrado en el log.")
+            await update.effective_message.reply_text(outgoing("Ocurrió un error interno. Quedó registrado en el log."))
         except Exception:
             log.exception("No se pudo avisar del error")
     raise ApplicationHandlerStop
@@ -512,23 +512,22 @@ async def _update_loop(app: Application, services: Services) -> None:
     while not services.stop.is_set():
         try:
             result = await asyncio.to_thread(services.updater.check)
-            await announce_update(app.bot, services, result)
+            report_update(services, result)
         except Exception:
             log.exception("Error buscando actualizaciones")
         await _sleep_or_stop(services.stop, interval)
 
 
-async def announce_update(bot, services: Services, result: UpdateResult) -> None:
-    """Avisa por Telegram una sola vez por versión instalada o disponible."""
+def report_update(services: Services, result: UpdateResult) -> None:
+    """Registra una sola vez por versión una actualización instalada o disponible.
+
+    Solo en el log (y la consola): CoClody no escribe primero por Telegram
+    salvo para avisos de tareas.
+    """
     if result.status not in ("installed", "available") or result.version in services.announced_versions:
         return
     services.announced_versions.add(result.version)
-    prefix = "⬆️ " if result.status == "installed" else "ℹ️ "
-    for chat_id in sorted(services.config.telegram.allowed_chat_ids):
-        try:
-            await bot.send_message(chat_id=chat_id, text=prefix + no_autolink(result.message), reply_markup=MAIN_KEYBOARD)
-        except Exception as exc:
-            log.warning("No se pudo avisar la actualización al chat %s: %s", chat_id, exc)
+    log.warning("Actualización: %s", result.message)
 
 
 async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> None:

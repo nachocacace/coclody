@@ -49,6 +49,10 @@ class FakeTelegram(BaseRequest):
                          connect_timeout=None, pool_timeout=None):
         name = url.rsplit("/", 1)[-1]
         params = dict(request_data.parameters) if request_data else {}
+        if isinstance(params.get("text"), str):
+            # "text" es lo que ve el usuario (sin los WORD JOINER que cortan los autolinks); "raw_text" lo enviado.
+            params["raw_text"] = params["text"]
+            params["text"] = params["text"].replace("\u2060", "")
         self.calls.append((name, params))
         if self.failures.get(name):
             status, description = self.failures[name].pop(0)
