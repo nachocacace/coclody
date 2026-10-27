@@ -92,3 +92,57 @@ def message_update(chat_id: int, text: str, *, user_id: int | None = None, chat_
             "text": "pregunta",
         }
     return {"update_id": next(_update_ids), "message": message}
+
+
+# --- payloads con la forma de la Bot API (no la que espera el código) -----------------------------
+
+
+def bot_message(message_id: int, chat_id: int, text: str, *, date: int | None = None) -> dict:
+    """Un mensaje enviado por el bot, como lo devuelve Telegram: con entidades para cada /comando."""
+    entities = []
+    for word_start, word in _words(text):
+        if word.startswith("/") and len(word) > 1:
+            entities.append({"type": "bot_command", "offset": _utf16_len(text[:word_start]), "length": _utf16_len(word)})
+    msg = {"message_id": message_id, "from": BOT_USER, "chat": {"id": chat_id, "first_name": "Nacho", "type": "private"},
+           "date": int(time.time()) if date is None else date, "text": text}
+    if entities:
+        msg["entities"] = entities
+    return msg
+
+
+def user_text(chat_id: int, text: str, *, reply_to: dict | None = None, external_reply: dict | None = None,
+              quote: str | None = None, thread_id: int | None = None, message_id: int = 5000) -> dict:
+    """Un mensaje de texto del usuario. ``reply_to`` es el mensaje completo al que responde."""
+    msg = {"message_id": message_id, "date": int(time.time()),
+           "from": {"id": chat_id, "is_bot": False, "first_name": "Nacho", "language_code": "es"},
+           "chat": {"id": chat_id, "first_name": "Nacho", "type": "private"}, "text": text}
+    if reply_to is not None:
+        msg["reply_to_message"] = reply_to
+    if external_reply is not None:
+        msg["external_reply"] = external_reply
+    if quote is not None:
+        msg["quote"] = {"text": quote, "position": 0}
+    if thread_id is not None:
+        msg["message_thread_id"] = thread_id
+    return {"update_id": next(_update_ids), "message": msg}
+
+
+def external_reply_to(message: dict) -> dict:
+    """Cómo describe Telegram un reply a un mensaje de otro hilo o chat (ExternalReplyInfo)."""
+    return {"origin": {"type": "user", "date": message["date"], "sender_user": message["from"]},
+            "chat": message["chat"], "message_id": message["message_id"]}
+
+
+def _words(text: str):
+    start = None
+    for i, ch in enumerate(text + " "):
+        if ch.isspace():
+            if start is not None:
+                yield start, text[start:i]
+                start = None
+        elif start is None:
+            start = i
+
+
+def _utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2

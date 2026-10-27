@@ -53,7 +53,8 @@ def format_failed(task: Task, run: Run | None) -> str:
 def format_question(task: Task, question: Question) -> str:
     return clip(
         f"❓ La tarea #{task.id} ({task.title}) necesita un dato:\n\n{question.question}\n\n"
-        f"Respondé a este mensaje, o mandá /responder {task.id} <respuesta>."
+        f"Para responder: mantené apretado este mensaje → Responder, o mandá /responder {task.id} <respuesta>. "
+        "Si contestás desde la notificación, Telegram no lo toma como respuesta a este mensaje."
     )
 
 

@@ -319,6 +319,16 @@ def list_questions(conn: sqlite3.Connection, task_id: int, status: str | None = 
     return [Question(**dict(row)) for row in rows]
 
 
+def open_questions_sent_to(conn: sqlite3.Connection, chat_id: int) -> list[Question]:
+    """Preguntas abiertas que se le enviaron a este chat, de la más vieja a la más nueva."""
+    rows = conn.execute(
+        "SELECT DISTINCT q.* FROM questions q JOIN notification_deliveries d ON d.part = q.id"
+        " WHERE q.status = 'open' AND d.part > 0 AND d.chat_id = ? AND d.status = 'sent' ORDER BY q.id",
+        (chat_id,),
+    )
+    return [Question(**dict(row)) for row in rows]
+
+
 def list_open_questions(conn: sqlite3.Connection, task_id: int | None = None) -> list[Question]:
     if task_id is None:
         rows = conn.execute("SELECT * FROM questions WHERE status = 'open' ORDER BY id")

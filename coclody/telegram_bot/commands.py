@@ -151,6 +151,28 @@ class Commands:
                 return "Esa pregunta ya no está pendiente."
             return self._answer(conn, question, text, chat_id)
 
+    def unmatched_text(self, chat_id: int) -> str:
+        """Texto que no es un comando ni un reply a una pregunta.
+
+        Nunca se lo toma como respuesta por adivinación: si hay preguntas
+        pendientes, se explica cómo responderlas. Pasa, por ejemplo, al
+        contestar desde la notificación del celular: Telegram manda un mensaje
+        común, no un reply al mensaje de la pregunta.
+        """
+        with self._db() as conn:
+            pending = repo.open_questions_sent_to(conn, chat_id)
+        if not pending:
+            return "No entendí. Mandá /ayuda para ver los comandos."
+        tasks = ", ".join(f"#{q.task_id}" for q in pending)
+        example = pending[-1].task_id
+        return (
+            "Tu mensaje no llegó como respuesta a una pregunta (Telegram no lo marcó como reply; "
+            "pasa, por ejemplo, al contestar desde la notificación).\n"
+            f"Preguntas pendientes: tarea {tasks}.\n"
+            "Para responder: mantené apretado el mensaje de la pregunta → Responder, "
+            f"o mandá /responder {example} <tu respuesta>."
+        )
+
     def cancel(self, arg: str) -> str:
         task_id = parse_task_id(arg)
         if task_id is None:

@@ -103,12 +103,18 @@ def build_application(
     ):
         app.add_handler(CommandHandler(list(names), _reply_with(fn), filters=only_new))
 
-    def on_reply(update: Update) -> str:
-        message = update.effective_message
-        text = c.answer_reply(update.effective_chat.id, message.reply_to_message.message_id, message.text)
+    def on_text(update: Update) -> str:
+        message, chat_id = update.effective_message, update.effective_chat.id
+        target = replied_message_id(message, chat_id)
+        if target is None:
+            log.info("Texto sin reply a una pregunta: %s", _reply_shape(message))
+            return c.unmatched_text(chat_id)
+        text = c.answer_reply(chat_id, target, message.text)
         return text if text is not None else "Ese mensaje no es una pregunta pendiente. Usá /responder <id> <texto>."
 
-    app.add_handler(MessageHandler(only_new & filters.REPLY & filters.TEXT & ~filters.COMMAND, _reply_with(on_reply)))
+    # Todo texto que no sea comando pasa por on_text: la decisión de si es una respuesta se toma
+    # en código (replied_message_id), no en un filtro que dependa de la forma exacta del update.
+    app.add_handler(MessageHandler(only_new & filters.TEXT & ~filters.COMMAND, _reply_with(on_text)))
     app.add_handler(MessageHandler(only_new, _reply_with(lambda u: "No entendí. Mandá /ayuda para ver los comandos.")))
     app.add_error_handler(_on_error)
     return app
@@ -168,6 +174,30 @@ def _reply_with(fn):
             await update.effective_message.reply_text(clip(text))
 
     return handler
+
+
+def replied_message_id(message, chat_id: int) -> int | None:
+    """message_id del mensaje al que responde, si es de este mismo chat.
+
+    Telegram usa ``reply_to_message`` para replies en el mismo chat e hilo, y
+    ``external_reply`` cuando el mensaje citado está en otro hilo (p. ej. con
+    los hilos de chats privados activados) o en otro chat. Solo se acepta el
+    mismo chat: un reply a un mensaje de otro chat nunca es una respuesta.
+    """
+    if message.reply_to_message is not None:
+        return message.reply_to_message.message_id
+    external = message.external_reply
+    if external is not None and external.chat is not None and external.chat.id == chat_id and external.message_id:
+        return external.message_id
+    return None
+
+
+def _reply_shape(message) -> str:
+    # Solo la forma (qué campos de reply trae), nunca el texto: sirve para diagnosticar clientes raros.
+    return (
+        f"reply_to={message.reply_to_message is not None} external_reply={message.external_reply is not None} "
+        f"quote={message.quote is not None} thread={message.message_thread_id}"
+    )
 
 
 def _args(update: Update) -> str:
