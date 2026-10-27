@@ -167,3 +167,40 @@ def test_non_executable_file_rejected(ws, tmp_path):
     exe.chmod(0o644)
     with pytest.raises(SandboxError):
         resolve_executable(str(exe), ws)
+
+
+# --- búsqueda en el PATH sin directorio actual ---------------------------------------------------
+
+from coclody.orchestrator.sandbox import find_in_path  # noqa: E402
+
+
+def test_path_search_ignores_current_directory(tmp_path, monkeypatch):
+    make_exe(tmp_path / "cwd")
+    monkeypatch.chdir(tmp_path / "cwd")
+    assert find_in_path("claude", env={"PATH": ""}) is None
+    assert find_in_path("claude", env={"PATH": "."}) is None
+    assert find_in_path("claude", env={"PATH": os.pathsep.join(["", ".", "cwd", "relativa"])}) is None
+
+
+def test_path_search_uses_first_absolute_match(tmp_path):
+    first, second = make_exe(tmp_path / "a"), make_exe(tmp_path / "b")
+    env = {"PATH": os.pathsep.join(["relativa", str(tmp_path / "a"), str(tmp_path / "b")])}
+    assert find_in_path("claude", env=env) == first
+    assert second.exists()
+
+
+def test_path_search_windows_pathext(tmp_path):
+    folder = tmp_path / "npm"
+    folder.mkdir()
+    (folder / "claude.CMD").write_bytes(b"@echo off\r\n")
+    env = {"PATH": f'"{folder}"', "PATHEXT": ".COM;.EXE;.BAT;.CMD"}
+    found = find_in_path("claude", env=env, windows=True)
+    assert found is not None and found.name.lower() == "claude.cmd"
+    assert find_in_path("claude", env={"PATH": str(folder), "PATHEXT": ".EXE"}, windows=True) is None
+
+
+@posix_only
+def test_path_search_requires_exec_bit_on_posix(tmp_path):
+    exe = make_exe(tmp_path / "bin")
+    exe.chmod(0o644)
+    assert find_in_path("claude", env={"PATH": str(tmp_path / "bin")}) is None

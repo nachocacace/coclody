@@ -47,7 +47,7 @@ Vas a necesitar:
 
 ### Paso 4: crear la carpeta de trabajo
 
-Es la carpeta donde Claude Code va a poder leer y modificar archivos. **No puede ir a ningún otro lado** (salvo que habilites herramientas extra; ver [Supuestos de seguridad](#supuestos-de-seguridad)).
+Es la carpeta donde Claude Code va a trabajar. Con la configuración que trae CoClody, sus herramientas de archivos están limitadas a esta carpeta. Igual, **CoClody no es una caja de arena del sistema operativo**: lo que Claude puede tocar depende de las herramientas que tenga permitidas (ver [Qué puede tocar Claude](#qué-puede-tocar-claude)). No pongas en esta carpeta nada que no le darías a Claude.
 
 1. Abrí el Explorador de archivos y entrá a tu carpeta de usuario (`C:\Users\<tu usuario>`).
 2. Creá una carpeta nueva, por ejemplo `CoClody-trabajo`.
@@ -57,7 +57,7 @@ No uses tu carpeta de usuario entera ni el disco `C:\` completo: CoClody no lo p
 
 ### Paso 5: bajar CoClody
 
-1. Entrá a la [página de descargas](https://github.com/USUARIO/coclody/releases/latest) y bajá `coclody.exe` y `SHA256SUMS.txt`.
+1. Entrá a la [página de descargas](https://github.com/nachocacace/coclody/releases/latest) y bajá `coclody.exe` y `SHA256SUMS.txt`.
 2. Creá la carpeta `C:\Users\<tu usuario>\CoClody` y mové `coclody.exe` ahí. No lo dejes en Descargas: las actualizaciones reemplazan el archivo en su lugar.
 3. (Recomendado) Verificá que el archivo es el original. En PowerShell:
    ```
@@ -86,7 +86,7 @@ El token queda guardado en el **Administrador de credenciales** de Windows, no e
 2. Al final del archivo, en la parte `[updates]`, cambiá `enabled = false` por `enabled = true`.
 3. En la línea `# github_repo = ""`, borrá el `#` del principio y completala así:
    ```
-   github_repo = "USUARIO/coclody"
+   github_repo = "nachocacace/coclody"
    ```
 4. Guardá (Ctrl+G o Ctrl+S) y cerrá el Bloc de notas.
 
@@ -178,6 +178,36 @@ Los registros (logs) están en `%LOCALAPPDATA%\CoClody\logs\`. `coclody.log` es 
 
 ---
 
+## Qué puede tocar Claude
+
+**CoClody no es una caja de arena del sistema operativo.** Claude Code corre con tus permisos de usuario. Lo único que decide qué puede tocar es la lista `allowed_tools` de `config.toml`, que CoClody le pasa a Claude Code (`--tools` + `--allowedTools`, con todo lo demás denegado).
+
+**Lo que trae por defecto:**
+
+```
+allowed_tools = ["Read(./**)", "Glob(./**)", "Grep(./**)", "Edit(./**)", "Write(./**)"]
+```
+
+`(./**)` limita cada herramienta a la carpeta de trabajo. Esto se verificó con Claude Code real (versión 2.1.304, en macOS):
+
+- **Sin `(./**)`**, Claude leyó un archivo de afuera, creó otro y editó un tercero, sin que nadie lo aprobara.
+- **Con `(./**)`**, se denegaron las rutas de afuera, las rutas con `../` y los symlinks que apuntan afuera, y adentro todo siguió funcionando.
+
+Es un comportamiento de Claude Code, no de CoClody: puede cambiar con una actualización del CLI.
+
+**Ampliar es explícito y cada ampliación abre algo concreto:**
+
+| Si agregás o cambiás | Le estás dando a Claude |
+|---|---|
+| `Read`, `Glob` o `Grep` sin `(./**)` | Leer **cualquier archivo** que vos puedas leer: claves SSH, documentos, credenciales guardadas en archivos. |
+| `Edit` o `Write` sin `(./**)` | Crear y modificar **cualquier archivo tuyo**, incluidos los que se ejecutan solos al iniciar sesión. Equivale a ejecutar código en tu PC. |
+| `Bash(...)`, aunque esté acotado | Ejecutar comandos con tus permisos. **Si además Edit o Write están habilitados, se puede escalar a cualquier comando**: muchas herramientas leen configuración del propio proyecto y ejecutan lo que dice ahí (por ejemplo `git` con la configuración del repo, `npm`, `make` o `pytest` con sus archivos de proyecto). Tratá cualquier Bash como acceso total. |
+| Otras herramientas (`WebFetch`, `WebSearch`, etc.) | Lo que esa herramienta haga; por ejemplo, red, que sirve para sacar datos de tu PC. |
+
+`coclody check` lista como `[aviso]` cada herramienta que amplía el default, y CoClody lo deja registrado en el log al arrancar.
+
+**Las instrucciones también pueden venir de los archivos.** Si le pedís a Claude que procese archivos que no escribiste vos (PDFs, repos bajados de internet), su contenido puede intentar darle órdenes. Con el default, lo peor que puede pasar queda dentro de la carpeta de trabajo; con herramientas ampliadas, no.
+
 ## Supuestos de seguridad
 
 Estos son supuestos explícitos del diseño. Si alguno no se cumple en tu caso, CoClody no es seguro para ese uso.
@@ -185,13 +215,11 @@ Estos son supuestos explícitos del diseño. Si alguno no se cumple en tu caso, 
 1. **Un bot por persona, y la lista blanca es de confianza total.** Cada persona tiene su propio bot con una lista de un solo chat: el suyo. Cualquier chat de `allowed_chat_ids` puede ver, crear, responder, cancelar y reintentar *cualquier* tarea. No hay permisos por tarea ni por usuario.
 2. **Solo chats privados.** Grupos y canales se rechazan siempre, aunque su ID esté en la lista, porque en un grupo cualquier miembro podría dar órdenes. Cada rechazo se registra en `security.log` (IDs, tipo de chat y motivo, nunca el texto del mensaje).
 3. **Claude Code carga tu `CLAUDE.md` y tus skills personales.** CoClody no carga ningún `settings.json` (ni del proyecto ni tuyo, vía `--setting-sources ""`) ni servidores MCP, pero Claude Code igual lee tu `~/.claude/CLAUDE.md` y tus skills personales. Evitarlo requiere el modo `--bare`, que solo autentica con `ANTHROPIC_API_KEY` (la API paga), y CoClody no lo usa a propósito. Revisá que lo que tengas ahí sea apropiado para tareas que llegan por Telegram.
-4. **No es un sandbox del sistema operativo.** Claude Code corre con tus permisos de usuario. Los límites son:
-   - directorio de trabajo dentro de `workspace_root`, verificado después de resolver symlinks;
-   - herramientas disponibles y preaprobadas solo las de `allowed_tools` (`--tools` + `--allowedTools`);
-   - todo lo no preaprobado se deniega (`--permission-mode dontAsk`, `--permission-prompts none`);
-   - el texto de las tareas va por stdin, nunca como argumento: no puede inyectar flags.
-
-   Si habilitás herramientas de Bash, eso puede salir de la carpeta de trabajo.
+4. **No es una caja de arena del sistema operativo.** Lo que Claude puede tocar depende solo de `allowed_tools` (ver [Qué puede tocar Claude](#qué-puede-tocar-claude)). Lo que sí garantiza CoClody:
+   - el directorio de trabajo es `workspace_root`, verificado después de resolver symlinks;
+   - las herramientas disponibles y preaprobadas son solo las de `allowed_tools`, y todo lo demás se deniega (`--permission-mode dontAsk`, `--permission-prompts none`);
+   - el texto de las tareas va por stdin, nunca como argumento, así que no puede inyectar flags;
+   - solo se procesan mensajes nuevos escritos por vos: los editados, los reenviados y los enviados a través de otro bot se ignoran; si el control de acceso falla por un error, deniega.
 5. **El token del bot vive solo en el llavero del sistema.** No está en el código, en el repo ni en la config, y se redacta de todos los logs.
 6. **Sin API paga.** Del entorno de Claude Code se quitan `ANTHROPIC_*` y `CLAUDE_CODE_USE_*`, para que siempre use tu sesión de Claude Code.
 7. **Actualizaciones firmadas.** Solo se instala un release cuyo manifiesto esté firmado (Ed25519) con la clave pública embebida en la app, que sea de una versión estrictamente mayor y cuyo archivo coincida en tamaño y SHA-256. La clave privada vive solo en el llavero de quien publica, nunca en el repo ni en GitHub Actions; quien la tenga puede publicar actualizaciones que las instalaciones existentes van a aceptar.
@@ -207,7 +235,7 @@ Estos son supuestos explícitos del diseño. Si alguno no se cumple en tu caso, 
 | `telegram.allowed_chat_ids` | (obligatoria) | Chat IDs autorizados. Ver supuestos de seguridad. |
 | `claude.workspace_root` | (obligatoria) | Carpeta de trabajo. Tiene que existir; no puede ser tu carpeta personal ni contener los datos de CoClody. |
 | `claude.executable` | `"claude"` | Nombre en el PATH o ruta absoluta al ejecutable de Claude Code. |
-| `claude.allowed_tools` | `["Read", "Glob", "Grep", "Edit", "Write"]` | Herramientas que Claude Code puede usar. `"Bash"` sin acotar no se admite: usá p. ej. `"Bash(git status:*)"`. |
+| `claude.allowed_tools` | `["Read(./**)", "Glob(./**)", "Grep(./**)", "Edit(./**)", "Write(./**)"]` | Herramientas que Claude Code puede usar, limitadas a la carpeta de trabajo. Antes de ampliarla, leé [Qué puede tocar Claude](#qué-puede-tocar-claude). `"Bash"` sin acotar no se admite. |
 | `claude.timeout_minutes` | `60` | Tiempo máximo por ejecución. |
 | `claude.max_stdout_bytes` / `max_stderr_bytes` | `2000000` / `200000` | Cuánta salida se guarda por ejecución. |
 | `updates.enabled` | `false` | Buscar e instalar actualizaciones automáticamente. |
@@ -282,4 +310,6 @@ El proceso completo, con comandos exactos, está en [RELEASE.md](RELEASE.md).
 ### Deuda técnica
 
 - `questions.tg_chat_id`, `questions.tg_message_id` y `repo.set_question_message()` quedaron sin uso desde la migración v3: las respuestas por reply se resuelven con `notification_deliveries`. Se mantienen para no migrar solo para quitarlas.
+- **Proceso huérfano en macOS/Linux.** Claude Code corre en una sesión propia. Si CoClody muere de golpe o se cierra la Terminal donde corre, Claude y sus procesos siguen sin timeout. Al reiniciar, la tarea se marca como fallida, pero el proceso viejo puede seguir trabajando en la misma carpeta. En Windows no pasa: el Job Object mata el árbol cuando CoClody termina.
+- **Aislamiento sin verificar en Windows.** Las reglas `(./**)` se verificaron con Claude Code real solo en macOS. Las pruebas automáticas del Job Object (que los nietos mueren) corren solo en Windows, en CI.
 - **No hay rotación de la clave de firma.** `keygen` nunca reemplaza la clave existente, y las instalaciones solo aceptan la clave pública que tienen embebida. Si la clave privada se pierde o se compromete, hay que publicar una versión con una clave nueva y distribuirla a mano.

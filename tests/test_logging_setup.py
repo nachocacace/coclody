@@ -58,3 +58,25 @@ def test_reconfigure_does_not_duplicate(app_log, app_paths):
 @pytest.mark.skipif(os.name != "posix", reason="permisos POSIX")
 def test_app_log_is_private(app_log):
     assert stat.S_IMODE(app_log.stat().st_mode) == 0o600
+
+
+def test_secret_part_of_token_is_redacted_even_url_encoded(app_log):
+    from urllib.parse import quote
+
+    logging.getLogger("coclody.test").warning("url: https://api.telegram.org/bot%s/getMe", quote(SECRET, safe=""))
+    text = read(app_log)
+    assert SECRET.split(":", 1)[1] not in text and "<redacted>" in text
+
+
+def test_redact_function_uses_registered_secrets(app_log):
+    from coclody.logging_setup import redact
+
+    assert redact(f"The token `{SECRET}` was rejected") == "The token `<redacted>` was rejected"
+    assert SECRET.split(":", 1)[1] not in redact("a%3A" + SECRET.split(":", 1)[1])
+    assert redact("nada que tapar") == "nada que tapar"
+
+
+def test_short_tails_are_not_treated_as_secrets(app_paths):
+    from coclody.logging_setup import _variants
+
+    assert _variants(["123:abc"]) == ("123:abc",)  # "abc" solo taparía texto legítimo

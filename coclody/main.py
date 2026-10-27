@@ -6,7 +6,7 @@ import logging
 import sys
 from contextlib import closing
 
-from coclody.config import ConfigError, load_config
+from coclody.config import ConfigError, load_config, tool_warnings
 from coclody.credentials import SecretError, SecretName, SecretStore
 from coclody.db import connect, connection_factory, migrate
 from coclody.logging_setup import configure_app_log
@@ -53,6 +53,8 @@ def run() -> int:
     services = Services(
         config=cfg, db=db, worker=worker, guard=ChatGuard(cfg.telegram.allowed_chat_ids), updater=updater
     )
+    for warning in tool_warnings(cfg.claude.allowed_tools):
+        log.warning("Herramienta ampliada respecto del default: %s", warning)
     log.info("CoClody arrancó; datos en %s", paths.data_dir)
     run_polling(build_application(token, services))
     return 0

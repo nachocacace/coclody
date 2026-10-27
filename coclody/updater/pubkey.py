@@ -14,7 +14,7 @@ import base64
 from nacl.signing import VerifyKey
 
 # Pegar acá la salida de `python tools/sign_release.py keygen` (base64, 32 bytes).
-PUBLIC_KEY_B64 = ""
+PUBLIC_KEY_B64 = "hZIR7OmJjbYx0IRR9U06RAGyDnWkJ86dVGD4k9JGswE="
 
 
 def release_verify_key(encoded: str | None = None) -> VerifyKey | None:

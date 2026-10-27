@@ -11,6 +11,7 @@ from coclody.config import ClaudeConfig, Config, TelegramConfig, UpdatesConfig
 from coclody.db import connection_factory, repo
 from coclody.orchestrator.worker import CancelRegistry, Worker
 from coclody.security import ChatGuard, close_security_log, configure_security_log
+from coclody.telegram_bot import app as app_module
 from coclody.telegram_bot.app import Services, build_application
 from coclody.telegram_bot.commands import Commands, parse_task_id
 from coclody.telegram_bot.notifier import flush_notifications
@@ -540,3 +541,151 @@ def test_announce_update_once_per_version(services, status, sent):
         assert all("0.2.0" in m["text"] for m in texts)
     else:
         assert texts == []
+
+
+# --- el guard cierra ante un error ------------------------------------------------------------
+
+
+class ExplodingGuard(ChatGuard):
+    def is_authorized(self, chat_id, user_id, chat_type, update_kind="message"):
+        raise RuntimeError("falla inesperada")
+
+
+@pytest.mark.parametrize("sender", [ME, STRANGER])
+def test_guard_exception_denies_everyone(services, conn, caplog, sender):
+    services.guard = ExplodingGuard({ME, BRO})
+
+    async def scenario():
+        async with Harness(services) as h:
+            return await h.send(sender, "/nueva no debería existir")
+
+    with caplog.at_level(logging.ERROR):
+        replies = run(scenario())
+    assert replies == []  # ni respuesta, ni "error interno"
+    assert repo.list_tasks(conn) == []
+    assert "El guard falló" in caplog.text
+
+
+def test_error_in_handler_stops_chain_and_only_answers_authorized(services, conn, monkeypatch):
+    from telegram.ext import MessageHandler, filters as tg_filters
+
+    later = []
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("falla en el comando")
+
+    monkeypatch.setattr(services.commands, "list_tasks", boom)
+
+    async def scenario():
+        async with Harness(services) as h:
+            h.app.add_handler(MessageHandler(tg_filters.ALL, lambda u, c: later.append(u)), group=1)
+            return await h.send(ME, "/lista")
+
+    assert run(scenario()) == ["Ocurrió un error interno. Quedó registrado en el log."]
+    assert later == []  # el manejador de errores cortó la cadena
+
+
+def test_error_handler_silent_for_stranger(services):
+    from telegram.ext import ApplicationHandlerStop
+
+    from coclody.telegram_bot import app as app_module
+
+    sent = []
+
+    class Msg:
+        async def reply_text(self, text):
+            sent.append(text)
+
+    class Chat:
+        id, type = STRANGER, "private"
+
+    class User:
+        id = STRANGER
+
+    class FakeUpdate(Update):
+        def __init__(self):
+            super().__init__(update_id=1)
+
+        @property
+        def effective_message(self):
+            return Msg()
+
+        @property
+        def effective_chat(self):
+            return Chat()
+
+        @property
+        def effective_user(self):
+            return User()
+
+    context = type("Ctx", (), {"bot_data": {"services": services}, "error": RuntimeError("x")})()
+    with pytest.raises(ApplicationHandlerStop):
+        run(app_module._on_error(FakeUpdate(), context))
+    assert sent == []
+
+
+# --- solo mensajes nuevos -----------------------------------------------------------------
+
+
+def edited(chat_id, text):
+    upd = message_update(chat_id, text)
+    msg = upd.pop("message")
+    msg["edit_date"] = msg["date"]
+    upd["edited_message"] = msg
+    return upd
+
+
+def test_edited_messages_are_ignored(services, conn):
+    async def scenario():
+        async with Harness(services) as h:
+            await h.app.process_update(Update.de_json(edited(ME, "/nueva desde un editado"), h.app.bot))
+            return h.fake.sent()
+
+    assert run(scenario()) == []
+    assert repo.list_tasks(conn) == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"forward_origin": {"type": "user", "date": 0, "sender_user": {"id": 555, "is_bot": False, "first_name": "X"}}},
+        {"forward_origin": {"type": "hidden_user", "date": 0, "sender_user_name": "Alguien"}},
+        {"via_bot": {"id": 777, "is_bot": True, "first_name": "OtroBot", "username": "otro_bot"}},
+    ],
+    ids=["reenviado", "reenviado-oculto", "via-bot"],
+)
+def test_forwarded_and_via_bot_messages_are_ignored(services, conn, extra):
+    upd = message_update(ME, "/nueva tarea ajena")
+    upd["message"].update(extra)
+
+    async def scenario():
+        async with Harness(services) as h:
+            await h.app.process_update(Update.de_json(upd, h.app.bot))
+            return [m["text"] for m in h.fake.sent()]
+
+    assert run(scenario()) == [app_module.FORWARDED_NOTICE]
+    assert repo.list_tasks(conn) == []
+
+
+def test_forwarded_reply_to_question_is_ignored(services, conn, db):
+    t = to_waiting(conn, queued_task(conn))
+
+    async def scenario():
+        async with Harness(services) as h:
+            await flush_notifications(h.app.bot, db, {ME})
+            message_id = h.fake.returned_ids[0]
+            upd = message_update(ME, "respuesta reenviada", reply_to=message_id)
+            upd["message"]["forward_origin"] = {"type": "user", "date": 0,
+                                                "sender_user": {"id": 555, "is_bot": False, "first_name": "X"}}
+            await h.app.process_update(Update.de_json(upd, h.app.bot))
+
+    run(scenario())
+    assert repo.list_open_questions(conn, task_id=t.id) != []  # la pregunta sigue abierta
+
+
+def test_plain_new_message_still_works(services, conn):
+    async def scenario():
+        async with Harness(services) as h:
+            return await h.send(ME, "/nueva tarea legítima")
+
+    assert "Creé la tarea #1" in run(scenario())[0]

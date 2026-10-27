@@ -16,7 +16,7 @@ antes de lanzar.
 from __future__ import annotations
 
 import os
-import shutil
+from collections.abc import Mapping
 from pathlib import Path
 
 from coclody.db.repo import ValidationError, normalize_workdir_rel
@@ -59,15 +59,40 @@ def resolve_executable(name_or_path: str, workspace_root: Path) -> Path:
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
             raise SandboxError(f"no existe o no es ejecutable: {candidate}")
     else:
-        found = shutil.which(name_or_path)
+        found = find_in_path(name_or_path)
         if found is None:
             raise SandboxError(f"no se encontró {name_or_path!r} en el PATH; ¿está instalado Claude Code?")
-        candidate = Path(found)
+        candidate = found
     exe = candidate.resolve()
     root = workspace_root.resolve()
     if exe.is_relative_to(root):
         raise SandboxError(f"el ejecutable no puede estar dentro de la carpeta de trabajo: {exe}")
     return exe
+
+
+def find_in_path(name: str, env: Mapping[str, str] | None = None, windows: bool | None = None) -> Path | None:
+    """Busca un ejecutable solo en las entradas absolutas del PATH.
+
+    No usa shutil.which: en Windows, which puede mirar primero el directorio
+    actual, y un ``claude.cmd`` dejado ahí (p. ej. en Descargas) le ganaría al
+    real. Las entradas relativas del PATH también dependen del directorio
+    actual, así que se ignoran en todas las plataformas.
+    """
+    env = os.environ if env is None else env
+    windows = os.name == "nt" if windows is None else windows
+    names = [name]
+    if windows and not Path(name).suffix:
+        exts = [e for e in env.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+        names = [name + ext for ext in exts]
+    for entry in env.get("PATH", "").split(os.pathsep):
+        directory = Path(entry.strip().strip('"'))
+        if not entry.strip() or not directory.is_absolute():
+            continue
+        for candidate_name in names:
+            candidate = directory / candidate_name
+            if candidate.is_file() and (windows or os.access(candidate, os.X_OK)):
+                return candidate
+    return None
 
 
 def _resolve_dir(path: Path, label: str) -> Path:

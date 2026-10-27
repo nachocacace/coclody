@@ -4,7 +4,7 @@ Pasos exactos para publicar CoClody. Los comandos son para macOS (la máquina do
 
 **Regla que no se rompe:** la clave privada de firma vive solo en tu llavero (servicio `coclody-release`). Nunca va al repo, a GitHub Actions ni a ningún otro lado. CI genera el manifiesto **sin firmar**; la firma se hace acá.
 
-Reemplazá `USUARIO` por tu usuario de GitHub en todos los comandos.
+El repo es `nachocacace/coclody`; los comandos ya lo usan.
 
 ---
 
@@ -40,14 +40,14 @@ Reemplazá `USUARIO` por tu usuario de GitHub en todos los comandos.
 
 ### 4. Completar los links del README
 
-- [ ] En `README.md`, reemplazá las dos apariciones de `USUARIO/coclody` (link de descargas y `github_repo` del paso 7) por tu repo real.
+- [ ] En `README.md`, el link de descargas y el `github_repo` del paso 7 apuntan a `nachocacace/coclody` (si el repo cambia de nombre, actualizalos).
 
 ### 5. Commit y repo público
 
 ```
 git add coclody/updater/pubkey.py README.md
 git commit -m "Clave pública de releases y links del repo"
-gh repo create USUARIO/coclody --public --source . --remote origin --push
+gh repo create nachocacace/coclody --public --source . --remote origin --push
 ```
 
 - [ ] El repo tiene que ser **público**: la app baja los releases sin credenciales.
@@ -80,7 +80,7 @@ gh run watch
 
 ```
 mkdir -p ~/coclody-releases/vX.Y.Z && cd ~/coclody-releases/vX.Y.Z
-gh release download vX.Y.Z --repo USUARIO/coclody --pattern coclody.exe --pattern manifest.json --pattern SHA256SUMS.txt
+gh release download vX.Y.Z --repo nachocacace/coclody --pattern coclody.exe --pattern manifest.json --pattern SHA256SUMS.txt
 shasum -a 256 -c SHA256SUMS.txt
 cat manifest.json
 ```
@@ -104,9 +104,9 @@ Desde la raíz del repo:
 ### 5. Subir la firma y publicar
 
 ```
-gh release upload vX.Y.Z ~/coclody-releases/vX.Y.Z/manifest.json.sig --repo USUARIO/coclody
-gh release view vX.Y.Z --repo USUARIO/coclody
-gh release edit vX.Y.Z --draft=false --repo USUARIO/coclody
+gh release upload vX.Y.Z ~/coclody-releases/vX.Y.Z/manifest.json.sig --repo nachocacace/coclody
+gh release view vX.Y.Z --repo nachocacace/coclody
+gh release edit vX.Y.Z --draft=false --repo nachocacace/coclody
 ```
 
 - [ ] Antes de publicar, `gh release view` lista los cuatro archivos: `coclody.exe`, `SHA256SUMS.txt`, `manifest.json` y `manifest.json.sig`. **Sin `manifest.json.sig` las instalaciones rechazan el release.**

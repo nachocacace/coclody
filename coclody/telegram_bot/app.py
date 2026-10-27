@@ -1,7 +1,11 @@
 """Armado y arranque del bot de Telegram (long polling).
 
 - Todo update pasa primero por ChatGuard (grupo -1). Si no está autorizado,
-  se registra en security.log y se corta ahí: ningún otro handler lo ve.
+  se registra en security.log y se corta ahí: ningún otro handler lo ve. Si
+  el guard falla por cualquier motivo, también corta: un guard roto deniega.
+- Solo se procesan mensajes nuevos escritos por el usuario: los editados, los
+  reenviados y los enviados a través de otro bot se ignoran (en el guard y,
+  además, en los filtros de cada handler).
 - Solo se piden updates de tipo ``message`` a Telegram.
 - Al arrancar se descartan los updates que Telegram tenía acumulados
   (``drop_pending_updates``), y además se ignora cualquier mensaje con fecha
@@ -87,6 +91,7 @@ def build_application(
 
     app.add_handler(TypeHandler(Update, _guard), group=-1)
     c = services.commands
+    only_new = filters.UpdateType.MESSAGE & ~filters.FORWARDED & ~filters.VIA_BOT
     for names, fn in (
         (("start", "ayuda"), lambda u: c.help()),
         (("lista",), lambda u: c.list_tasks()),
@@ -96,15 +101,15 @@ def build_application(
         (("cancelar",), lambda u: c.cancel(_args(u))),
         (("reintentar",), lambda u: c.retry(_args(u))),
     ):
-        app.add_handler(CommandHandler(list(names), _reply_with(fn)))
+        app.add_handler(CommandHandler(list(names), _reply_with(fn), filters=only_new))
 
     def on_reply(update: Update) -> str:
         message = update.effective_message
         text = c.answer_reply(update.effective_chat.id, message.reply_to_message.message_id, message.text)
         return text if text is not None else "Ese mensaje no es una pregunta pendiente. Usá /responder <id> <texto>."
 
-    app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, _reply_with(on_reply)))
-    app.add_handler(MessageHandler(filters.ALL, _reply_with(lambda u: "No entendí. Mandá /ayuda para ver los comandos.")))
+    app.add_handler(MessageHandler(only_new & filters.REPLY & filters.TEXT & ~filters.COMMAND, _reply_with(on_reply)))
+    app.add_handler(MessageHandler(only_new, _reply_with(lambda u: "No entendí. Mandá /ayuda para ver los comandos.")))
     app.add_error_handler(_on_error)
     return app
 
@@ -116,18 +121,44 @@ def run_polling(app: Application) -> None:
 # --- handlers -------------------------------------------------------------------
 
 
+FORWARDED_NOTICE = "Ignoré un mensaje reenviado: los comandos tienen que escribirse directamente."
+
+
 async def _guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    services: Services = context.bot_data["services"]
+    """Deja pasar solo mensajes nuevos de un chat autorizado. Ante cualquier error, deniega."""
+    try:
+        verdict, notice = _verdict(update, context.bot_data["services"])
+    except Exception:
+        log.exception("El guard falló; el update se descarta")
+        raise ApplicationHandlerStop from None
+    if verdict == "ok":
+        return
+    if notice:
+        try:
+            await update.effective_message.reply_text(notice)
+        except Exception:
+            log.exception("No se pudo avisar que se ignoró un mensaje")
+    raise ApplicationHandlerStop
+
+
+def _verdict(update: Update, services: Services) -> tuple[str, str | None]:
     chat, user = update.effective_chat, update.effective_user
     kind = next((name for name in Update.ALL_TYPES if getattr(update, name, None) is not None), "other")
     if not services.guard.is_authorized(
         chat.id if chat else None, user.id if user else None, chat.type if chat else None, kind
     ):
-        raise ApplicationHandlerStop
-    message = update.effective_message
-    if message is not None and message.date < services.started_at:
+        return "deny", None
+    message = update.message  # solo mensajes nuevos; edited_message y el resto no
+    if message is None:
+        log.info("Ignorado un update de tipo %s", kind)
+        return "ignore", None
+    if message.date < services.started_at:
         log.info("Ignorado un mensaje anterior al arranque (%s)", message.date.isoformat())
-        raise ApplicationHandlerStop
+        return "ignore", None
+    if message.forward_origin is not None or message.is_automatic_forward or message.via_bot is not None:
+        log.info("Ignorado un mensaje reenviado o enviado vía otro bot")
+        return "ignore", FORWARDED_NOTICE
+    return "ok", None
 
 
 def _reply_with(fn):
@@ -145,12 +176,23 @@ def _args(update: Update) -> str:
 
 
 async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Registra el error, avisa solo a un chat autorizado y corta cualquier handler que quedara."""
     log.error("Error procesando un update", exc_info=context.error)
-    if isinstance(update, Update) and update.effective_message is not None:
+    if isinstance(update, Update) and update.effective_message is not None and _permitted(update, context):
         try:
             await update.effective_message.reply_text("Ocurrió un error interno. Quedó registrado en el log.")
         except Exception:
             log.exception("No se pudo avisar del error")
+    raise ApplicationHandlerStop
+
+
+def _permitted(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    try:
+        chat, user = update.effective_chat, update.effective_user
+        guard: ChatGuard = context.bot_data["services"].guard
+        return guard.permits(chat.id if chat else None, user.id if user else None, chat.type if chat else None)
+    except Exception:
+        return False
 
 
 # --- bucles en segundo plano -------------------------------------------------------

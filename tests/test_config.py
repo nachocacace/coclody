@@ -49,6 +49,8 @@ def test_minimal_config_gets_defaults(app_paths, workspace):
     assert cfg.claude.workspace_root == workspace.resolve()
     assert cfg.claude.executable == "claude"
     assert cfg.claude.allowed_tools == DEFAULT_ALLOWED_TOOLS
+    assert all(t.endswith("(./**)") for t in DEFAULT_ALLOWED_TOOLS)
+    assert not any(t.startswith("Bash") for t in DEFAULT_ALLOWED_TOOLS)
     assert cfg.claude.timeout_minutes == 60
     assert (cfg.claude.max_stdout_bytes, cfg.claude.max_stderr_bytes) == (2_000_000, 200_000)
     assert cfg.updates.enabled is False
@@ -226,3 +228,23 @@ def test_template_never_overwrites(app_paths):
     with pytest.raises(FileExistsError):
         write_template(app_paths.config_file)
     assert app_paths.config_file.read_text(encoding="utf-8") == "# mío\n"
+
+
+def test_template_tools_are_the_restrictive_default():
+    assert tuple(tomllib.loads(TEMPLATE)["claude"]["allowed_tools"]) == DEFAULT_ALLOWED_TOOLS
+    assert "git status" not in TEMPLATE
+
+
+def test_tool_warnings():
+    from coclody.config import tool_warnings
+
+    assert tool_warnings(DEFAULT_ALLOWED_TOOLS) == []
+    found = tool_warnings(["Read", "Write(~/**)", "Grep(./**)", "Bash(npm test)", "WebFetch"])
+    assert [w.split(":", 1)[0] for w in found] == ["Read", "Write(~/**)", "Bash(npm test)", "WebFetch"]
+    assert "escalarlo" in found[2]
+
+
+def test_bare_bash_error_warns_about_escalation(app_paths, workspace):
+    write(app_paths, minimal(workspace) + 'allowed_tools = ["Bash"]\n')
+    (problem,) = problems(app_paths)
+    assert "escalar" in problem and "git status" not in problem

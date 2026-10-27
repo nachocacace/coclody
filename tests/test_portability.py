@@ -26,14 +26,14 @@ SPECIFIC_MODULES = {"fcntl", "termios", "pwd", "grp", "resource", "msvcrt", "win
                     "tty", "curses", "readline", "syslog", "crypt", "winsound"}
 
 PORTABLE = {
-    "os.name", "os.environ", "os.sep", "os.path", "os.getcwd", "os.open", "os.close", "os.fdopen", "os.replace",
+    "os.name", "os.environ", "os.sep", "os.pathsep", "os.path", "os.getcwd", "os.open", "os.close", "os.fdopen", "os.replace",
     "os.access", "os.X_OK", "os.W_OK", "os.R_OK", "os.F_OK", "os.O_CREAT", "os.O_EXCL", "os.O_WRONLY", "os.O_TRUNC",
     "os.O_RDONLY", "os.getpid", "os.urandom", "os.fspath",
     "signal.SIGTERM", "signal.SIGINT",
     "subprocess.Popen", "subprocess.PIPE", "subprocess.DEVNULL", "subprocess.STDOUT", "subprocess.run",
     "subprocess.TimeoutExpired", "subprocess.CalledProcessError",
     "ctypes.Structure", "ctypes.byref", "ctypes.sizeof", "ctypes.c_int", "ctypes.c_int64", "ctypes.c_size_t",
-    "ctypes.c_ulonglong",
+    "ctypes.c_ulonglong", "ctypes.c_void_p", "ctypes.c_uint32",
     "shutil.which", "shutil.copyfile", "shutil.rmtree", "shutil.move",
     "platform.machine", "platform.system",
     "time.monotonic", "time.sleep", "time.time",
@@ -57,7 +57,7 @@ PLATFORM_SPECIFIC: dict[str, tuple[str, set[str]]] = {
     "select.KQ_*": ("macOS y BSD", {PROCESS}),
     "subprocess.CREATE_NEW_PROCESS_GROUP": ("solo Windows", {PROCESS}),
     "subprocess.CREATE_NO_WINDOW": ("solo Windows", {PROCESS}),
-    "ctypes.WinDLL": ("solo Windows", {PROCESS}),
+    "ctypes.WinDLL": ("solo Windows", {PROCESS, "tests/test_process.py"}),
     "ctypes.WinError": ("solo Windows", {PROCESS}),
     "ctypes.get_last_error": ("solo Windows", {PROCESS}),
     "ctypes.wintypes": ("pensado para Windows; se importa solo dentro de `if sys.platform == \"win32\"`", {PROCESS}),

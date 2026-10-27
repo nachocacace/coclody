@@ -7,11 +7,12 @@ el bot. Así, en Windows, abrir el ejecutable con doble clic hace lo esperable.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from contextlib import closing
 
 from coclody import __version__
-from coclody.config import ConfigError, load_config
+from coclody.config import ConfigError, load_config, tool_warnings
 from coclody.credentials import SecretError, SecretName, SecretStore
 from coclody.db import SCHEMA_VERSION, connect
 from coclody.db.migrations import current_version
@@ -56,6 +57,15 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nInterrumpido.", file=sys.stderr)
         code = 130
+    except Exception as exc:
+        # Sin esto el traceback salía por consola sin pasar por la redacción de secretos
+        # (p. ej. InvalidToken de python-telegram-bot incluye el token en el mensaje).
+        from coclody.logging_setup import redact
+
+        logging.getLogger("coclody").exception("Error inesperado")
+        print(redact(f"Error inesperado: {type(exc).__name__}: {exc}"), file=sys.stderr)
+        print(f"El detalle quedó en el log: {paths.app_log}", file=sys.stderr)
+        code = 1
     return _finish(code, bare)
 
 
@@ -70,6 +80,12 @@ def check(paths: AppPaths, store: SecretStore, out=print) -> int:
         out(f"[ERROR] {exc}")
         return 2
     out(f"[ok] Configuración válida; carpeta de trabajo: {cfg.claude.workspace_root}")
+    warnings = tool_warnings(cfg.claude.allowed_tools)
+    if warnings:
+        for warning in warnings:
+            out(f"[aviso] Herramienta ampliada: {warning}")
+    else:
+        out("[ok] Herramientas limitadas a la carpeta de trabajo")
 
     try:
         token = store.get(SecretName.TELEGRAM_BOT_TOKEN)

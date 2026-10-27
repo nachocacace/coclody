@@ -19,7 +19,13 @@ from typing import Any
 
 from coclody.paths import AppPaths
 
-DEFAULT_ALLOWED_TOOLS = ("Read", "Glob", "Grep", "Edit", "Write")
+# Alcance de archivos de Claude Code: "./**" es la carpeta de trabajo (el cwd) y todo lo que
+# contiene. Sin alcance, Read/Edit/Write llegan a cualquier archivo del usuario: verificado con
+# Claude Code 2.1.304 (con "Write" a secas, Claude creó un archivo fuera de la carpeta). Con
+# "(./**)" se deniegan rutas absolutas de afuera, "../" y symlinks que apuntan afuera.
+WORKSPACE_SCOPE = "(./**)"
+FILE_TOOLS = ("Read", "Glob", "Grep", "Edit", "Write", "MultiEdit", "NotebookEdit")
+DEFAULT_ALLOWED_TOOLS = tuple(f"{tool}{WORKSPACE_SCOPE}" for tool in ("Read", "Glob", "Grep", "Edit", "Write"))
 # Sin comas: --allowedTools las usa como separador.
 _TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\([^(),\r\n]*\))?$")
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -40,9 +46,10 @@ allowed_chat_ids = []
 workspace_root = ""
 # Nombre del ejecutable (se busca en el PATH) o ruta absoluta.
 executable = "claude"
-# Herramientas que Claude Code puede usar sin pedir permiso.
-# "Bash" sin restricción no está permitido; usá la forma acotada, p. ej. "Bash(git status:*)".
-allowed_tools = ["Read", "Glob", "Grep", "Edit", "Write"]
+# Herramientas que Claude Code puede usar. "(./**)" las limita a la carpeta de trabajo.
+# Cualquier ampliación (quitar el "(./**)", agregar Bash, WebFetch, etc.) le da a Claude acceso
+# a más cosas de tu computadora: leé "Qué puede tocar Claude" en el README antes de cambiarlo.
+allowed_tools = ["Read(./**)", "Glob(./**)", "Grep(./**)", "Edit(./**)", "Write(./**)"]
 timeout_minutes = 60
 # Límite de salida que se guarda por ejecución (el resto se descarta).
 max_stdout_bytes = 2000000
@@ -156,11 +163,28 @@ def load_config(paths: AppPaths, path: Path | None = None) -> Config:
 
 
 def is_valid_tool_spec(spec: object) -> bool:
-    """Nombre de herramienta de Claude Code, opcionalmente acotado: ``Read``, ``Bash(git status:*)``.
+    """Nombre de herramienta de Claude Code, opcionalmente acotado: ``Read``, ``Read(./**)``.
 
     ``Bash`` sin acotar no es válido. Lo usan la config y el runner.
     """
     return isinstance(spec, str) and bool(_TOOL_RE.fullmatch(spec)) and spec != "Bash"
+
+
+def tool_warnings(tools: tuple[str, ...] | list[str]) -> list[str]:
+    """Avisos por cada herramienta que amplía lo que Claude puede tocar respecto del default."""
+    warnings = []
+    for spec in tools:
+        base = spec.split("(", 1)[0]
+        if base in FILE_TOOLS and spec != f"{base}{WORKSPACE_SCOPE}":
+            warnings.append(f"{spec}: puede acceder a archivos fuera de la carpeta de trabajo")
+        elif base == "Bash":
+            warnings.append(
+                f"{spec}: ejecuta comandos con tus permisos; si además Edit o Write están habilitados, "
+                "Claude puede escalarlo a cualquier comando (p. ej. vía la configuración del proyecto)"
+            )
+        elif base not in FILE_TOOLS:
+            warnings.append(f"{spec}: herramienta fuera del default; revisá qué habilita")
+    return warnings
 
 
 def write_template(path: Path) -> None:
@@ -271,7 +295,10 @@ def _tools(value: Any) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(t, str) for t in value):
         raise _Invalid("tiene que ser una lista de nombres de herramientas")
     if "Bash" in value:
-        raise _Invalid('"Bash" sin restricción no está permitido; usá la forma acotada, p. ej. "Bash(git status:*)"')
+        raise _Invalid(
+            '"Bash" sin restricción no está permitido. Incluso acotado, Bash se puede escalar a cualquier '
+            "comando si Edit o Write están habilitados: leé el README antes de agregarlo"
+        )
     bad = [t for t in value if not is_valid_tool_spec(t)]
     if bad:
         raise _Invalid(f"nombres inválidos: {', '.join(map(repr, bad))}")

@@ -186,3 +186,44 @@ def test_check_reports_release_key(app_paths, store, ws, exe, monkeypatch, key, 
     store.set(SecretName.TELEGRAM_BOT_TOKEN, TOKEN)
     code, text = run_check(app_paths, store)
     assert code == 0 and line in text
+
+
+def test_unexpected_error_is_reported_redacted(isolated, monkeypatch, capsys, tmp_path):
+    from coclody import logging_setup
+
+    secret = "123456789:AAH" + "z" * 32
+    logging_setup.configure_app_log(tmp_path / "app.log", secrets=[secret], console=False)
+
+    def crash():
+        raise RuntimeError(f"The token `{secret}` was rejected by the server.")
+
+    monkeypatch.setattr("coclody.main.run", crash)
+    try:
+        assert cli.main(["run"]) == 1
+    finally:
+        logging_setup.configure_app_log(tmp_path / "otro.log", console=False)
+    err = capsys.readouterr().err
+    assert "Error inesperado: RuntimeError" in err and "<redacted>" in err
+    assert secret not in err and secret.split(":", 1)[1] not in err
+    assert secret not in (tmp_path / "app.log").read_text(encoding="utf-8")
+
+
+def test_check_lists_widened_tools(app_paths, store, ws, exe):
+    text = render_config(1, str(ws)).replace(
+        'allowed_tools = ["Read(./**)", "Glob(./**)", "Grep(./**)", "Edit(./**)", "Write(./**)"]',
+        'allowed_tools = ["Read", "Edit(./**)", "Bash(ls:*)"]',
+    )
+    app_paths.config_file.write_text(text, encoding="utf-8")
+    store.set(SecretName.TELEGRAM_BOT_TOKEN, TOKEN)
+    code, out = run_check(app_paths, store)
+    assert code == 0
+    assert "[aviso] Herramienta ampliada: Read: puede acceder a archivos fuera" in out
+    assert "[aviso] Herramienta ampliada: Bash(ls:*)" in out
+    assert "Edit(./**)" not in out
+
+
+def test_check_default_tools_are_ok(app_paths, store, ws, exe):
+    app_paths.config_file.write_text(render_config(1, str(ws)), encoding="utf-8")
+    store.set(SecretName.TELEGRAM_BOT_TOKEN, TOKEN)
+    _, out = run_check(app_paths, store)
+    assert "[ok] Herramientas limitadas a la carpeta de trabajo" in out

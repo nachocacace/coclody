@@ -268,3 +268,70 @@ def test_real_mode_is_one_that_exists():
         assert hasattr(os, "waitid") and hasattr(os, "WNOWAIT")
     if mode == "kqueue":
         assert hasattr(select, "kqueue")
+
+
+# --- Windows: el Job Object mata a los nietos -----------------------------------------------
+
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="Job Object: solo Windows")
+
+
+def win_alive(pid: int) -> bool:
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    synchronize, query_limited, wait_timeout = 0x00100000, 0x1000, 0x102
+    handle = kernel32.OpenProcess(synchronize | query_limited, 0, pid)
+    if not handle:
+        return False  # ya no existe
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def win_wait_dead(pid: int, seconds: float = 10.0) -> bool:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if not win_alive(pid):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@windows_only
+def test_windows_job_kills_grandchildren_on_timeout(tmp_path):
+    pidfile = tmp_path / "pid"
+    r = run(GRANDCHILD.format(after="time.sleep(60)"), str(pidfile), tmp_path=tmp_path, timeout=3)
+    assert r.timed_out
+    pid = int(pidfile.read_text())
+    assert win_wait_dead(pid), f"el nieto {pid} sigue vivo después del timeout"
+
+
+@windows_only
+def test_windows_job_kills_orphans_after_normal_exit(tmp_path):
+    code = GRANDCHILD.replace(
+        'subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])',
+        'subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.DEVNULL, '
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+    ).format(after="print('listo')")
+    pidfile = tmp_path / "pid"
+    r = run(code, str(pidfile), tmp_path=tmp_path, timeout=30)
+    assert r.exit_code == 0 and b"listo" in r.stdout
+    pid = int(pidfile.read_text())
+    assert win_wait_dead(pid), f"el nieto {pid} sobrevivió a la salida normal del hijo"
+
+
+@windows_only
+def test_windows_alive_helper_sees_a_live_process():
+    proc = subprocess.Popen([PY, "-c", "import time; time.sleep(30)"])
+    try:
+        assert win_alive(proc.pid)  # sin esto, los tests de arriba podrían pasar por un helper roto
+    finally:
+        proc.kill()
+        proc.wait()
+    assert win_wait_dead(proc.pid)

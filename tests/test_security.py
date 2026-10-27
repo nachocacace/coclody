@@ -99,3 +99,54 @@ def test_security_log_is_separate_and_private(guard, sec_log, caplog):
     assert caplog.records == []  # no se propaga al log general
     if os.name == "posix":
         assert stat.S_IMODE(sec_log.stat().st_mode) == 0o600
+
+
+# --- límite de registro de rechazos -----------------------------------------------------------
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_rejection_logging_is_rate_limited_per_chat(sec_log):
+    from coclody.security import LOG_BURST, LOG_WINDOW_S
+
+    clock = Clock()
+    guard = ChatGuard([ME], clock=clock)
+    for _ in range(50):
+        assert guard.is_authorized(999, 999, "private") is False  # se rechaza siempre
+    assert len(lines(sec_log)) == LOG_BURST
+    assert guard.is_authorized(888, 888, "private") is False  # otro chat tiene su propio cupo
+    assert len(lines(sec_log)) == LOG_BURST + 1
+
+    clock.now += LOG_WINDOW_S
+    guard.is_authorized(999, 999, "private")
+    summary, rejected = lines(sec_log)[-2:]
+    assert f"suprimidos chat_id=999 rechazos={50 - LOG_BURST}" in summary
+    assert "rechazado reason=not_in_whitelist chat_id=999" in rejected
+
+
+def test_authorized_chats_are_never_limited(sec_log):
+    guard = ChatGuard([ME], clock=Clock())
+    assert all(guard.is_authorized(ME, ME, "private") for _ in range(100))
+    assert lines(sec_log) == []
+
+
+def test_many_distinct_chats_do_not_grow_memory_unbounded(sec_log):
+    from coclody import security
+
+    guard = ChatGuard([ME], clock=Clock())
+    for chat in range(1, security._MAX_TRACKED_CHATS * 3):
+        guard.is_authorized(10_000 + chat, 10_000 + chat, "private")
+    assert len(guard._windows) <= security._MAX_TRACKED_CHATS
+
+
+def test_permits_does_not_log(sec_log):
+    guard = ChatGuard([ME])
+    assert guard.permits(ME, ME, "private") is True
+    assert guard.permits(999, 999, "private") is False
+    assert lines(sec_log) == []
