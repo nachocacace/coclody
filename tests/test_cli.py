@@ -178,8 +178,11 @@ def test_update_needs_repo(app_paths, ws):
     assert "github_repo" in lines[0]
 
 
-def test_check_reports_missing_release_key(app_paths, store, ws, exe):
+@pytest.mark.parametrize(("key", "line"), [(None, "[aviso] Sin clave pública de releases"),
+                                           (object(), "[ok] Clave pública de releases configurada")])
+def test_check_reports_release_key(app_paths, store, ws, exe, monkeypatch, key, line):
+    monkeypatch.setattr("coclody.updater.pubkey.release_verify_key", lambda: key)
     app_paths.config_file.write_text(render_config(1, str(ws)), encoding="utf-8")
     store.set(SecretName.TELEGRAM_BOT_TOKEN, TOKEN)
     code, text = run_check(app_paths, store)
-    assert code == 0 and "[aviso] Sin clave pública de releases" in text
+    assert code == 0 and line in text

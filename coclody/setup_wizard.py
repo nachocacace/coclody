@@ -98,7 +98,7 @@ def _setup_config(paths: AppPaths, ask: Ask, out: Out) -> bool:
     temp = target.with_name(target.name + ".tmp")
     try:
         for _ in range(MAX_ATTEMPTS):
-            raw = ask("Carpeta de trabajo para Claude Code (ruta absoluta, tiene que existir): ").strip()
+            raw = _unquote(ask("Carpeta de trabajo para Claude Code (ruta absoluta, tiene que existir): "))
             if not raw:
                 raise SetupAborted
             _write_private(temp, render_config(chat_id, str(Path(raw).expanduser())))
@@ -115,6 +115,14 @@ def _setup_config(paths: AppPaths, ask: Ask, out: Out) -> bool:
         temp.unlink(missing_ok=True)
     out("Demasiados intentos; no se creó la configuración.")
     return False
+
+
+def _unquote(raw: str) -> str:
+    """Quita las comillas que agrega "Copiar como ruta" del Explorador de Windows."""
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        raw = raw[1:-1].strip()
+    return raw
 
 
 def _ask_chat_id(ask: Ask, out: Out) -> int:

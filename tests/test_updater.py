@@ -482,12 +482,17 @@ def test_release_verify_key(key):
     assert release_verify_key("") is None
     assert release_verify_key("no-base64!") is None
     assert release_verify_key(base64.b64encode(b"corta").decode()) is None
-    assert release_verify_key() is None  # el repo todavía no tiene clave pública
+
+
+def test_embedded_key_is_empty_or_valid():
+    # Vale antes y después de pegar la clave en pubkey.py; lo que no puede pasar es una clave rota.
+    from coclody.updater import pubkey
+
+    assert (pubkey.release_verify_key() is None) == (pubkey.PUBLIC_KEY_B64.strip() == "")
 
 
 def test_updater_defaults_are_safe(monkeypatch, updates_dir):
     up = Updater(REPO, updates_dir)
     assert up.executable is None  # desde fuente: nunca se reemplaza nada
-    assert up.key is None
     assert isinstance(up.http, UrllibHttp)
     assert client_module.MAX_RELEASE_JSON_BYTES == 1024 * 1024

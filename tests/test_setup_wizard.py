@@ -159,3 +159,10 @@ def test_render_config_escapes_paths(workspace_text):
     data = tomllib.loads(render_config(42, workspace_text))
     assert data["claude"]["workspace_root"] == workspace_text
     assert data["telegram"]["allowed_chat_ids"] == [42]
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_quoted_path_from_windows_explorer(app_paths, store, workspace, quote):
+    s = Script(answers=["111", f"  {quote}{workspace}{quote} "], secrets=[TOKEN])
+    assert s.run(app_paths, store) == 0
+    assert load_config(app_paths).claude.workspace_root == workspace.resolve()

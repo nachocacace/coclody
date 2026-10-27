@@ -99,11 +99,12 @@ def test_sign_refuses_key_not_embedded_in_app(store, asset):
     assert not manifest.with_name("manifest.json.sig").exists()
 
 
-def test_sign_refuses_without_embedded_key(store, asset):
+def test_sign_refuses_without_embedded_key(store, asset, monkeypatch):
+    monkeypatch.setattr(sign_release, "release_verify_key", lambda: None)  # pubkey.py vacío
     sign_release.keygen(store, out=lambda _: None)
     manifest = write_manifest(asset)
     with pytest.raises(sign_release.SigningError, match="pubkey.py"):
-        sign_release.sign(manifest, asset, store)  # el repo todavía no tiene clave pública
+        sign_release.sign(manifest, asset, store)
 
 
 def test_sign_refuses_mismatching_asset(store, asset):
