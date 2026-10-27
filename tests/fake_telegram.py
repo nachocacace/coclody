@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from itertools import count
 
 from telegram.request import BaseRequest
@@ -23,7 +24,7 @@ class FakeTelegram(BaseRequest):
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.failures: dict[str, list[tuple[int, str]]] = {}
-        self._ids = count(1000)
+        self.returned_ids: list[int] = []
 
     @property
     def read_timeout(self) -> float:
@@ -53,8 +54,9 @@ class FakeTelegram(BaseRequest):
             result = BOT_USER
         elif name == "sendMessage":
             chat_id = int(params["chat_id"])
+            self.returned_ids.append(next(_message_ids))
             result = {
-                "message_id": next(self._ids),
+                "message_id": self.returned_ids[-1],
                 "date": 0,
                 "chat": {"id": chat_id, "type": "private"},
                 "from": BOT_USER,
@@ -66,13 +68,15 @@ class FakeTelegram(BaseRequest):
 
 
 _update_ids = count(1)
+# Global, como en Telegram: un message_id no se repite dentro de un chat.
+_message_ids = count(1000)
 
 
 def message_update(chat_id: int, text: str, *, user_id: int | None = None, chat_type: str = "private",
-                   reply_to: int | None = None, message_id: int = 1) -> dict:
+                   reply_to: int | None = None, message_id: int = 1, date: int | None = None) -> dict:
     message = {
         "message_id": message_id,
-        "date": 0,
+        "date": int(time.time()) if date is None else date,
         "chat": {"id": chat_id, "type": chat_type},
         "from": {"id": chat_id if user_id is None else user_id, "is_bot": False, "first_name": "Nacho"},
         "text": text,

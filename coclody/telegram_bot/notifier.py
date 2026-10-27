@@ -4,8 +4,13 @@ Solo se notifican los eventos marcados con ``notify`` (cambios a done, failed
 y waiting_input). Destinatario: quien creó la tarea, si sigue en la lista
 blanca; si no (o si la tarea no tiene creador), todos los chats de la lista.
 
+Cada envío se registra por destinatario (y por pregunta, en waiting_input).
+El evento queda notificado recién cuando todos sus destinatarios tienen su
+envío registrado: si un envío falla a mitad de camino, el reintento solo
+cubre a los que faltan, sin duplicar a los demás.
+
 Si Telegram rechaza el mensaje de forma permanente (bot bloqueado, chat
-inexistente) el evento se marca igual como enviado y se loguea, para no
+inexistente) ese envío se registra como ``rejected`` y se loguea, para no
 reintentarlo para siempre. Ante errores transitorios (red, rate limit) se
 corta la tanda y se reintenta en la próxima.
 """
@@ -34,6 +39,7 @@ class _Pending:
     new_status: str
     last_run: Run | None
     questions: list[Question]
+    delivered: set[tuple[int, int]]
 
 
 def format_done(task: Task, run: Run | None) -> str:
@@ -71,24 +77,27 @@ async def flush_notifications(bot: Bot, db: DbFactory, allowed_chat_ids: Iterabl
 
 
 async def _deliver(bot: Bot, db: DbFactory, item: _Pending, recipients: list[int]) -> None:
+    """Envía las partes que falten. Un error transitorio se propaga (corta la tanda)."""
     if item.new_status == "waiting_input":
-        messages = [(q, format_question(item.task, q)) for q in item.questions]
+        parts = [(q.id, format_question(item.task, q)) for q in item.questions]
     elif item.new_status == "done":
-        messages = [(None, format_done(item.task, item.last_run))]
+        parts = [(0, format_done(item.task, item.last_run))]
     elif item.new_status == "failed":
-        messages = [(None, format_failed(item.task, item.last_run))]
+        parts = [(0, format_failed(item.task, item.last_run))]
     else:
         return
-    for question, text in messages:
+    for part, text in parts:
         for chat_id in recipients:
+            if (chat_id, part) in item.delivered:
+                continue
             try:
                 sent = await bot.send_message(chat_id=chat_id, text=text)
             except (Forbidden, BadRequest) as exc:
                 log.warning("Telegram rechazó la notificación al chat %s: %s", chat_id, exc)
+                await asyncio.to_thread(_record, db, item.event.id, chat_id, part, "rejected", None)
                 continue
-            if question is not None:
-                await asyncio.to_thread(_link_question, db, question.id, chat_id, sent.message_id)
-                question = None  # se asocia solo el primer mensaje enviado
+            # Para una pregunta, este registro es también lo que permite responderla con reply.
+            await asyncio.to_thread(_record, db, item.event.id, chat_id, part, "sent", sent.message_id)
 
 
 def _collect(db: DbFactory, limit: int) -> list[_Pending]:
@@ -97,9 +106,11 @@ def _collect(db: DbFactory, limit: int) -> list[_Pending]:
         for event in repo.pending_notifications(conn, limit=limit):
             task = repo.get_task(conn, event.task_id)
             runs = repo.list_runs(conn, event.task_id)
-            questions = [q for q in repo.list_open_questions(conn, task_id=event.task_id) if q.tg_message_id is None]
+            questions = repo.list_open_questions(conn, task_id=event.task_id)
             new_status = event.message.rsplit("→", 1)[-1].strip()
-            out.append(_Pending(event, task, new_status, runs[-1] if runs else None, questions))
+            out.append(
+                _Pending(event, task, new_status, runs[-1] if runs else None, questions, repo.delivered(conn, event.id))
+            )
         return out
 
 
@@ -108,12 +119,9 @@ def _mark(db: DbFactory, event_id: int) -> None:
         repo.mark_notified(conn, [event_id])
 
 
-def _link_question(db: DbFactory, question_id: int, chat_id: int, message_id: int) -> None:
+def _record(db: DbFactory, event_id: int, chat_id: int, part: int, status: str, message_id: int | None) -> None:
     with db() as conn:
-        try:
-            repo.set_question_message(conn, question_id, chat_id, message_id)
-        except repo.InvalidTransitionError:
-            pass  # ya estaba asociada
+        repo.record_delivery(conn, event_id, chat_id, part, status, message_id)
 
 
 def _summary(run: Run | None) -> str:

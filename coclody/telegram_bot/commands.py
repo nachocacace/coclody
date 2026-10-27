@@ -40,6 +40,7 @@ CoClody: tareas para Claude Code.
 /estado <id>: detalle de una tarea
 /responder <id> <texto>: responde la pregunta pendiente de una tarea. También podés responder directamente al mensaje de la pregunta.
 /cancelar <id>: cancela una tarea
+/reintentar <id>: vuelve a poner en cola una tarea que falló
 /ayuda: esta ayuda"""
 
 _ID_RE = re.compile(r"#?([1-9][0-9]{0,15})")
@@ -174,6 +175,23 @@ class Commands:
                     repo.expire_question(conn, q.id)
                 return f"Cancelé la tarea #{task.id}."
         return f"La tarea #{task_id} cambió de estado mientras la cancelaba; probá de nuevo."
+
+    def retry(self, arg: str) -> str:
+        """Vuelve a encolar una tarea fallida (failed → queued, según TASK_TRANSITIONS)."""
+        task_id = parse_task_id(arg)
+        if task_id is None:
+            return "Uso: /reintentar <id>"
+        with self._db() as conn:
+            task = repo.get_task(conn, task_id)
+            if task is None:
+                return f"No existe la tarea #{task_id}."
+            if task.status != "failed":
+                return f"Solo se reintentan tareas que fallaron; la #{task.id} está {label(task.status)}."
+            try:
+                repo.transition_task(conn, task.id, "queued", expected="failed")
+            except InvalidTransitionError:
+                return f"La tarea #{task.id} cambió de estado; revisá /estado {task.id}."
+        return f"La tarea #{task.id} volvió a la cola."
 
     def _answer(self, conn, question: Question, text: str, chat_id: int) -> str:
         try:

@@ -1,0 +1,122 @@
+# Tests en macOS y Windows, build del ejecutable de Windows y release en borrador.
+#
+# - Python 3.12, el mínimo soportado: el ejecutable se arma con él.
+# - Dependencias solo desde los locks con hashes (--require-hashes, solo wheels).
+# - Actions fijadas por SHA de commit, no por tag (un tag se puede mover).
+# - Un tag v* publica un release EN BORRADOR con el .exe y su SHA-256. La firma
+#   del manifiesto se hace después, localmente, con la clave privada que nunca
+#   está en GitHub; recién ahí se publica el release.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUTF8: "1"
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Instalar dependencias desde el lock
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r requirements-build.txt
+      - name: Tests
+        run: python -m pytest
+
+  build-windows:
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Instalar dependencias desde el lock
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r requirements-build.txt
+      - name: Armar el ejecutable
+        run: python -m PyInstaller --clean --noconfirm coclody.spec
+      - name: Prueba de humo del ejecutable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $data = Join-Path $env:RUNNER_TEMP "coclody-data"
+          $ws = Join-Path $env:RUNNER_TEMP "coclody-ws"
+          New-Item -ItemType Directory -Force -Path $data, $ws | Out-Null
+          python -c "import sys; from coclody.setup_wizard import render_config; open(sys.argv[1], 'w', encoding='utf-8').write(render_config(42, sys.argv[2]))" (Join-Path $data "config.toml") $ws
+          $env:COCLODY_DATA_DIR = $data
+          .\dist\coclody.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "--version falló" }
+          # Sin token en el Credential Manager: tiene que llegar al llavero y avisar que falta.
+          $out = (.\dist\coclody.exe check 2>&1 | Out-String)
+          Write-Output $out
+          if ($LASTEXITCODE -ne 2) { throw "check debía salir con 2, salió con $LASTEXITCODE" }
+          if ($out -notmatch "Falta telegram_bot_token") { throw "check no consultó el llavero" }
+          # Sin acentos en el patrón: la salida puede decodificarse con otra página de códigos.
+          if ($out -notmatch "Configuraci.n v.lida") { throw "check no validó la config" }
+          # El wrapper de Actions termina con `exit $LASTEXITCODE`: el 2 esperado no debe fallar el paso.
+          $global:LASTEXITCODE = 0
+      - name: Calcular SHA-256
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist\coclody.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  coclody.exe" | Out-File -Encoding ascii dist\SHA256SUMS.txt
+          Get-Content dist\SHA256SUMS.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coclody-windows
+          path: |
+            dist/coclody.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  release-draft:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coclody-windows
+          path: dist
+      - name: Crear release en borrador
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/coclody.exe dist/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --draft --title "CoClody $TAG" \
+            --notes "Borrador generado por CI. Antes de publicar: verificar el SHA-256 y adjuntar el manifiesto firmado."

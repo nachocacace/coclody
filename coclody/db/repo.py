@@ -295,9 +295,16 @@ def get_question(conn: sqlite3.Connection, question_id: int) -> Question | None:
 
 
 def get_question_by_message(conn: sqlite3.Connection, tg_chat_id: int, tg_message_id: int) -> Question | None:
+    """Pregunta enviada en ese mensaje de ese chat (por cualquiera de sus envíos)."""
     row = conn.execute(
         "SELECT * FROM questions WHERE tg_chat_id = ? AND tg_message_id = ?", (tg_chat_id, tg_message_id)
     ).fetchone()
+    if row is None:
+        row = conn.execute(
+            "SELECT q.* FROM notification_deliveries d JOIN questions q ON q.id = d.part"
+            " WHERE d.part > 0 AND d.chat_id = ? AND d.tg_message_id = ?",
+            (tg_chat_id, tg_message_id),
+        ).fetchone()
     return Question(**dict(row)) if row else None
 
 
@@ -445,6 +452,39 @@ def mark_notified(conn: sqlite3.Connection, event_ids: Iterable[int]) -> int:
             )
             changed += cur.rowcount
     return changed
+
+
+def record_delivery(
+    conn: sqlite3.Connection,
+    event_id: int,
+    chat_id: int,
+    part: int,
+    status: str,
+    tg_message_id: int | None = None,
+) -> bool:
+    """Registra el envío de (una parte de) un evento a un chat. False si ya estaba registrado."""
+    if status not in ("sent", "rejected"):
+        raise ValidationError(f"estado de envío inválido: {status!r}")
+    values = (
+        _int(event_id, "event_id", 1, 2**63 - 1),
+        _int(chat_id, "chat_id", 1, 2**53),
+        _int(part, "part", 0, 2**63 - 1),
+        status,
+        None if tg_message_id is None else _int(tg_message_id, "tg_message_id", 1, 2**53),
+    )
+    with transaction(conn):
+        cur = conn.execute(
+            "INSERT INTO notification_deliveries (event_id, chat_id, part, status, tg_message_id)"
+            " VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            values,
+        )
+        return cur.rowcount == 1
+
+
+def delivered(conn: sqlite3.Connection, event_id: int) -> set[tuple[int, int]]:
+    """(chat_id, part) ya registrados para el evento, enviados o rechazados."""
+    rows = conn.execute("SELECT chat_id, part FROM notification_deliveries WHERE event_id = ?", (event_id,))
+    return {(row["chat_id"], row["part"]) for row in rows}
 
 
 def _insert_event(

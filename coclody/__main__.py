@@ -1,5 +1,5 @@
 import sys
 
-from coclody.main import run
+from coclody.cli import main
 
-sys.exit(run())
+sys.exit(main())

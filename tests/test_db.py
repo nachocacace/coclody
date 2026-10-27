@@ -435,7 +435,7 @@ def test_mark_notified_many_ids(conn):
     assert repo.pending_notifications(conn) == []
 
 
-def test_migration_v1_to_v2_keeps_data(app_paths):
+def test_migration_from_v1_keeps_data(app_paths):
     from coclody.db import migrations
 
     c = connect(app_paths.db_file)
@@ -445,7 +445,7 @@ def test_migration_v1_to_v2_keeps_data(app_paths):
         c.execute("PRAGMA user_version = 1")
     c.execute("INSERT INTO tasks (title) VALUES ('vieja')")
     c.execute("INSERT INTO task_events (task_id, kind, message) VALUES (1, 'progress', 'antes')")
-    assert migrate(c) == 2
+    assert migrate(c) == SCHEMA_VERSION
     (event,) = repo.list_events(c, 1)
     assert (event.message, event.notify, event.notified) == ("antes", 0, 0)
     assert repo.pending_notifications(c) == []
@@ -464,3 +464,46 @@ def test_events_are_deleted_with_task(conn):
     repo.transition_task(conn, t.id, "cancelled")
     repo.delete_task(conn, t.id)
     assert conn.execute("SELECT count(*) FROM task_events").fetchone()[0] == 0
+
+
+# --- notification_deliveries ---------------------------------------------------------------
+
+
+def test_record_delivery_is_idempotent(conn):
+    t = repo.create_task(conn, "x")
+    e = repo.add_event(conn, t.id, "progress", "p")
+    assert repo.record_delivery(conn, e.id, 111, 0, "sent", 55) is True
+    assert repo.record_delivery(conn, e.id, 111, 0, "rejected") is False
+    assert repo.record_delivery(conn, e.id, 222, 0, "rejected") is True
+    assert repo.delivered(conn, e.id) == {(111, 0), (222, 0)}
+    row = conn.execute("SELECT status, tg_message_id FROM notification_deliveries WHERE chat_id = 111").fetchone()
+    assert tuple(row) == ("sent", 55)
+
+
+@pytest.mark.parametrize(
+    "args", [(0, 111, 0, "sent"), (1, 0, 0, "sent"), (1, 111, -1, "sent"), (1, 111, 0, "otro"), (1, 111, 0, "sent", 0)]
+)
+def test_record_delivery_validation(conn, args):
+    t = repo.create_task(conn, "x")
+    repo.add_event(conn, t.id, "progress", "p")
+    with pytest.raises(ValidationError):
+        repo.record_delivery(conn, *args)
+
+
+def test_deliveries_cascade_with_task(conn):
+    t = repo.create_task(conn, "x")
+    e = repo.add_event(conn, t.id, "progress", "p")
+    repo.record_delivery(conn, e.id, 111, 0, "sent", 1)
+    repo.delete_task(conn, t.id)
+    assert conn.execute("SELECT count(*) FROM notification_deliveries").fetchone()[0] == 0
+
+
+def test_question_lookup_through_deliveries(conn):
+    t = repo.create_task(conn, "x")
+    q = repo.ask_question(conn, t.id, "¿a?")
+    e = repo.add_event(conn, t.id, "question", "¿a?")
+    repo.record_delivery(conn, e.id, 222, q.id, "sent", 77)
+    repo.record_delivery(conn, e.id, 333, 0, "sent", 78)  # part 0 no es una pregunta
+    assert repo.get_question_by_message(conn, 222, 77).id == q.id
+    assert repo.get_question_by_message(conn, 333, 78) is None
+    assert repo.get_question_by_message(conn, 111, 77) is None

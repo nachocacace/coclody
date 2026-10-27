@@ -90,8 +90,28 @@ CREATE UNIQUE INDEX idx_questions_tg_message ON questions(tg_chat_id, tg_message
     WHERE tg_message_id IS NOT NULL;
 """
 
+# v3: registro de envíos por destinatario. Un evento se marca como notificado
+# recién cuando todos sus destinatarios tienen su envío registrado, así un
+# reintento solo cubre a los que fallaron. ``part`` es 0 para el mensaje del
+# evento, o el id de la pregunta enviada (un evento waiting_input puede llevar
+# varias). El message_id sirve para responder con reply desde cualquier chat.
+_V3 = """
+CREATE TABLE notification_deliveries (
+    event_id      INTEGER NOT NULL REFERENCES task_events(id) ON DELETE CASCADE,
+    chat_id       INTEGER NOT NULL,
+    part          INTEGER NOT NULL DEFAULT 0 CHECK (part >= 0),
+    status        TEXT    NOT NULL CHECK (status IN ('sent', 'rejected')),
+    tg_message_id INTEGER,
+    created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (event_id, chat_id, part)
+) STRICT;
+
+CREATE INDEX idx_deliveries_message ON notification_deliveries(chat_id, tg_message_id)
+    WHERE tg_message_id IS NOT NULL;
+"""
+
 # Orden estricto: la migración N lleva la base de user_version N-1 a N.
-MIGRATIONS: tuple[str, ...] = (_V1, _V2)
+MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

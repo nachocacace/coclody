@@ -246,9 +246,11 @@ def test_bot_reply_to_question_message(services, conn, db):
             (question_msg,) = h.fake.sent()
             assert question_msg["chat_id"] == ME  # solo a quien creó la tarea
             assert "¿Qué color?" in question_msg["text"]
-            q = repo.list_questions(conn, t.id)[0]
-            assert q.tg_chat_id == ME
-            (reply,) = await h.send(ME, "verde", reply_to=q.tg_message_id)
+            chat_id, message_id = conn.execute(
+                "SELECT chat_id, tg_message_id FROM notification_deliveries"
+            ).fetchone()
+            assert chat_id == ME and message_id == question_msg_id(h)
+            (reply,) = await h.send(ME, "verde", reply_to=message_id)
             assert "vuelve a la cola" in reply
             (reply,) = await h.send(ME, "otra cosa", reply_to=5)
             assert "no es una pregunta pendiente" in reply
@@ -256,6 +258,11 @@ def test_bot_reply_to_question_message(services, conn, db):
     run(scenario())
     assert repo.get_task(conn, t.id).status == "queued"
     assert repo.list_questions(conn, t.id)[0].answer == "verde"
+
+
+def question_msg_id(h):
+    # El message_id que devolvió el cliente simulado para el primer sendMessage.
+    return h.fake.returned_ids[0]
 
 
 def test_bot_internal_error_is_reported_without_details(services, conn, monkeypatch, caplog):
@@ -352,3 +359,158 @@ def test_long_summary_is_clipped(conn, db):
     fake = FakeTelegram()
     notify(db, fake)
     assert len(fake.sent()[0]["text"]) <= 4096
+
+
+# --- /reintentar ---------------------------------------------------------------------
+
+
+def test_retry_failed_task(cmds, conn):
+    t = finish(conn, queued_task(conn), "failed", "se rompió")
+    assert cmds.retry(str(t.id)) == f"La tarea #{t.id} volvió a la cola."
+    t = repo.get_task(conn, t.id)
+    assert t.status == "queued" and t.finished_at is None
+
+
+@pytest.mark.parametrize("status", ["queued", "done", "cancelled", "waiting_input"])
+def test_retry_only_failed(cmds, conn, status):
+    t = queued_task(conn)
+    if status == "done":
+        finish(conn, t, "done", "ok")
+    elif status == "cancelled":
+        repo.transition_task(conn, t.id, "cancelled")
+    elif status == "waiting_input":
+        to_waiting(conn, t)
+    assert "Solo se reintentan tareas que fallaron" in cmds.retry(str(t.id))
+    assert repo.get_task(conn, t.id).status == status
+
+
+def test_retry_usage_and_missing(cmds):
+    assert cmds.retry("x").startswith("Uso:")
+    assert cmds.retry("5") == "No existe la tarea #5."
+
+
+def test_retry_via_bot(services, conn):
+    t = finish(conn, queued_task(conn), "failed", "x")
+
+    async def scenario():
+        async with Harness(services) as h:
+            return await h.send(ME, f"/reintentar {t.id}")
+
+    assert run(scenario()) == [f"La tarea #{t.id} volvió a la cola."]
+    assert "/reintentar" in Commands.help(None)
+
+
+# --- mensajes anteriores al arranque ----------------------------------------------------
+
+
+def test_messages_older_than_startup_are_ignored(services, conn, caplog):
+    async def scenario():
+        async with Harness(services) as h:
+            old = int(services.started_at.timestamp()) - 3600
+            ignored = await h.send(ME, "/nueva tarea de hace una hora", date=old)
+            fresh = await h.send(ME, "/nueva tarea de ahora")
+            return ignored, fresh
+
+    with caplog.at_level(logging.INFO):
+        ignored, fresh = run(scenario())
+    assert ignored == [] and "Creé la tarea #1" in fresh[0]
+    assert [t.title for t in repo.list_tasks(conn)] == ["tarea de ahora"]
+    assert "anterior al arranque" in caplog.text
+
+
+def test_old_message_from_stranger_is_still_logged_as_rejected(services, sec_log):
+    async def scenario():
+        async with Harness(services) as h:
+            return await h.send(STRANGER, "/lista", date=0)
+
+    assert run(scenario()) == []
+    logging.getLogger("coclody.security").handlers[0].flush()
+    assert "reason=not_in_whitelist" in sec_log.read_text(encoding="utf-8")
+
+
+def test_polling_drops_pending_updates(monkeypatch, services):
+    from coclody.telegram_bot import app as app_module
+
+    captured = {}
+    application = build_application(TOKEN, services, request=FakeTelegram(), get_updates_request=FakeTelegram())
+    monkeypatch.setattr(type(application), "run_polling", lambda self, **kw: captured.update(kw))
+    app_module.run_polling(application)
+    assert captured == {"allowed_updates": ["message"], "drop_pending_updates": True}
+
+
+# --- envíos por destinatario ---------------------------------------------------------------
+
+
+def test_retry_only_covers_failed_recipients(conn, db):
+    finish(conn, queued_task(conn, created_by=None), "done", "listo")  # va a ME y a BRO
+    fake = FakeTelegram()
+    original = fake.do_request
+    sent_ok = []
+
+    async def flaky(url, method, request_data=None, **kw):
+        if url.endswith("/sendMessage") and int(request_data.parameters["chat_id"]) == BRO:
+            return 502, b'{"ok": false, "error_code": 502, "description": "Bad Gateway"}'
+        status, body = await original(url, method, request_data, **kw)
+        if url.endswith("/sendMessage"):
+            sent_ok.append(int(request_data.parameters["chat_id"]))
+        return status, body
+
+    fake.do_request = flaky
+    assert notify(db, fake) == 0
+    assert sent_ok == [ME]
+    assert len(repo.pending_notifications(conn)) == 1  # BRO todavía no lo recibió
+
+    retry = FakeTelegram()
+    assert notify(db, retry) == 1
+    assert [m["chat_id"] for m in retry.sent()] == [BRO]  # ME no lo recibe dos veces
+    assert repo.pending_notifications(conn) == []
+
+
+def test_rejected_recipient_does_not_block_others(conn, db):
+    finish(conn, queued_task(conn, created_by=None), "done", "listo")
+    fake = FakeTelegram()
+    fake.fail_next("sendMessage", 403, "Forbidden: bot was blocked by the user")
+    assert notify(db, fake) == 1
+    deliveries = conn.execute("SELECT chat_id, status FROM notification_deliveries ORDER BY chat_id").fetchall()
+    assert [tuple(r) for r in deliveries] == [(ME, "rejected"), (BRO, "sent")]
+
+
+def test_question_can_be_answered_by_reply_from_any_recipient(services, conn, db):
+    t = to_waiting(conn, queued_task(conn, created_by=None))
+
+    async def scenario():
+        async with Harness(services) as h:
+            await flush_notifications(h.app.bot, db, {ME, BRO})
+            by_chat = {m["chat_id"]: m for m in h.fake.sent()}
+            assert set(by_chat) == {ME, BRO}
+            bro_message_id = conn.execute(
+                "SELECT tg_message_id FROM notification_deliveries WHERE chat_id = ?", (BRO,)
+            ).fetchone()[0]
+            return await h.send(BRO, "naranja", reply_to=bro_message_id)
+
+    (reply,) = run(scenario())
+    assert "vuelve a la cola" in reply
+    q = repo.list_questions(conn, t.id)[0]
+    assert (q.answer, q.answered_by) == ("naranja", BRO)
+
+
+def test_waiting_input_with_two_questions_resumes_partially(conn, db):
+    t = to_waiting(conn, queued_task(conn))
+    repo.ask_question(conn, t.id, "¿Y el tamaño?")
+    fake = FakeTelegram()
+    original = fake.do_request
+    count_sent = []
+
+    async def second_fails(url, method, request_data=None, **kw):
+        if url.endswith("/sendMessage"):
+            count_sent.append(1)
+            if len(count_sent) == 2:
+                return 502, b'{"ok": false, "error_code": 502, "description": "Bad Gateway"}'
+        return await original(url, method, request_data, **kw)
+
+    fake.do_request = second_fails
+    assert notify(db, fake) == 0
+    retry = FakeTelegram()
+    assert notify(db, retry) == 1
+    (only,) = retry.sent()
+    assert "¿Y el tamaño?" in only["text"]  # la primera pregunta no se repite
