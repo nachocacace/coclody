@@ -436,7 +436,11 @@ def test_polling_drops_pending_updates(monkeypatch, services):
     application = build_application(TOKEN, services, request=FakeTelegram(), get_updates_request=FakeTelegram())
     monkeypatch.setattr(type(application), "run_polling", lambda self, **kw: captured.update(kw))
     app_module.run_polling(application)
-    assert captured == {"allowed_updates": ["message"], "drop_pending_updates": True}
+    assert captured == {
+        "allowed_updates": ["message"],
+        "drop_pending_updates": True,
+        "close_loop": False,  # el loop es nuestro: la limpieza final corre en él (ver test_shutdown)
+    }
 
 
 # --- envíos por destinatario ---------------------------------------------------------------

@@ -309,6 +309,17 @@ El proceso completo, con comandos exactos, está en [RELEASE.md](RELEASE.md).
 
 ### Deuda técnica
 
+Huecos de tests conocidos (el código existe, pero no hay un test que lo ejercite de punta a punta):
+
+- **Bucles de fondo armados.** El worker, el notificador y las actualizaciones se prueban por separado. Solo `tests/test_shutdown.py` corre `run_polling` de verdad, y únicamente para el apagado.
+- **Mensajes que no son texto.** Un audio o una foto mandados como respuesta a una pregunta reciben "No entendí", sin orientar.
+- **Límite de envíos de Telegram (`RetryAfter`).** No está probado, y el notificador reintenta a los 3 segundos sin respetar la espera que pide Telegram.
+- **Payloads sintéticos.** Los updates de prueba se arman a mano con la forma de la Bot API. Lo ideal es guardar un update real, sin el texto, como fixture.
+
+Otros:
+
+- **Polling muerto, proceso vivo.** Si el polling termina con error (p. ej. `InvalidToken` porque se revocó el token), python-telegram-bot no para la aplicación. CoClody sigue corriendo sin recibir mensajes hasta que se lo cierra; al cerrarlo, la limpieza sí corre (`run_polling`).
+
 - `questions.tg_chat_id`, `questions.tg_message_id` y `repo.set_question_message()` quedaron sin uso desde la migración v3: las respuestas por reply se resuelven con `notification_deliveries`. Se mantienen para no migrar solo para quitarlas.
 - **Proceso huérfano en macOS/Linux.** Claude Code corre en una sesión propia. Si CoClody muere de golpe o se cierra la Terminal donde corre, Claude y sus procesos siguen sin timeout. Al reiniciar, la tarea se marca como fallida, pero el proceso viejo puede seguir trabajando en la misma carpeta. En Windows no pasa: el Job Object mata el árbol cuando CoClody termina.
 - **Aislamiento sin verificar en Windows.** Las reglas `(./**)` se verificaron con Claude Code real solo en macOS. Las pruebas automáticas del Job Object (que los nietos mueren) corren solo en Windows, en CI.

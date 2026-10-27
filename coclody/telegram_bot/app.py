@@ -14,7 +14,8 @@
   una tarea nunca se interpreta como Markdown/HTML.
 - En segundo plano corren el worker (una tarea a la vez, en un hilo), el envío
   de notificaciones y, si están habilitadas, las actualizaciones. Al parar, se
-  cancela la tarea en curso y se espera a que el worker la cierre.
+  cancela la tarea en curso y se espera a que el worker la cierre. Esa limpieza
+  corre también si el polling termina con error (``run_polling``).
 """
 
 from __future__ import annotations
@@ -67,6 +68,7 @@ class Services:
     announced_versions: set[str] = field(default_factory=set)
     stop: asyncio.Event | None = None
     background: list[asyncio.Task] = field(default_factory=list)
+    stopped: bool = False
     # Telegram fecha los mensajes con resolución de segundos.
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC).replace(microsecond=0))
 
@@ -121,7 +123,26 @@ def build_application(
 
 
 def run_polling(app: Application) -> None:
-    app.run_polling(allowed_updates=ALLOWED_UPDATES, drop_pending_updates=True)
+    """Corre el bot hasta que se lo pare, y siempre deja todo cerrado al salir.
+
+    Si el polling termina con error (p. ej. el token se revocó: InvalidToken),
+    ``Application.run_polling`` vuelve a lanzar ese error al parar el updater,
+    dentro de su propio ``finally``, y se saltea stop, post_stop y shutdown.
+    Por eso el loop es nuestro (``close_loop=False``) y la limpieza corre acá
+    en cualquier caso: cancelar la tarea en curso, esperar al worker, enviar
+    lo pendiente y cerrar la aplicación. En el camino normal ya corrió en
+    post_stop y acá no hace nada. El error original se sigue propagando.
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        app.run_polling(allowed_updates=ALLOWED_UPDATES, drop_pending_updates=True, close_loop=False)
+    finally:
+        try:
+            loop.run_until_complete(_close(app))
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
 
 
 # --- handlers -------------------------------------------------------------------
@@ -240,9 +261,26 @@ async def _post_init(app: Application) -> None:
 
 
 async def _post_stop(app: Application) -> None:
+    await _stop_services(app)
+
+
+async def _close(app: Application) -> None:
+    """Limpieza final de run_polling; en el camino normal todo ya está cerrado y no hace nada."""
+    await _stop_services(app)
+    try:
+        if app.running:
+            await app.stop()
+        await app.shutdown()
+    except Exception:
+        log.exception("No se pudo cerrar la aplicación de Telegram")
+
+
+async def _stop_services(app: Application) -> None:
+    """Para los bucles de fondo una sola vez, aunque se llame desde post_stop y desde _close."""
     services: Services = app.bot_data["services"]
-    if services.stop is None:
+    if services.stop is None or services.stopped:
         return
+    services.stopped = True
     services.stop.set()
     services.worker.cancels.cancel_all(CANCEL_SHUTDOWN)
     done, pending = await asyncio.wait(services.background, timeout=SHUTDOWN_WAIT_S)
