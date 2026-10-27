@@ -174,7 +174,10 @@ def test_executable_inside_workspace_rejected(ws, fake_claude):
         build_invocation(cfg(ws, planted), "x")
 
 
-@pytest.mark.parametrize("prompt", ["", "   ", None, "a\x00b", "x" * (claude_runner.MAX_PROMPT_CHARS + 1)])
+@pytest.mark.parametrize(
+    "prompt",
+    ["", "   ", None, "a\x00b", pytest.param("x" * (claude_runner.MAX_PROMPT_CHARS + 1), id="demasiado-largo")],
+)
 def test_prompt_validation(ws, fake_claude, prompt):
     with pytest.raises(SandboxError):
         build_invocation(cfg(ws, fake_claude), prompt)

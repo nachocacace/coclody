@@ -5,11 +5,19 @@
   se bloquee con el pipe lleno), pero solo se guardan los primeros N bytes.
 - Al terminar, siempre (salida normal, timeout o cancelación) se mata lo que
   quede del árbol: Claude Code lanza subprocesos (shells, node, etc.).
-  - POSIX: el hijo arranca en su propia sesión (``start_new_session``). Se
-    espera su salida con ``waitid(WNOWAIT)``, que no lo cosecha: mientras el
-    líder es un zombie su ID de grupo no se puede reutilizar, así que el
-    ``killpg`` final nunca le pega a un grupo ajeno. Si hubo timeout o
-    cancelación se manda SIGTERM, se dan unos segundos y luego SIGKILL.
+  - POSIX: el hijo arranca en su propia sesión (``start_new_session``). Su
+    salida se detecta sin cosecharlo: mientras el líder es un zombie su ID de
+    grupo no se puede reutilizar, así que el ``killpg`` final nunca le pega a
+    un grupo ajeno. Si hubo timeout o cancelación se manda SIGTERM, se dan
+    unos segundos y luego SIGKILL. Cómo se detecta la salida sin cosechar
+    depende de lo que ofrezca el intérprete (se elige por ``hasattr``, no por
+    nombre de plataforma; ver ``_exit_mode``):
+      * ``os.waitid(WNOWAIT)``: Linux siempre; macOS desde Python 3.13.
+      * ``select.kqueue`` con ``NOTE_EXIT``: macOS con Python 3.12, BSD.
+      * Si no hay ninguno de los dos, ``poll()`` (que sí cosecha): el árbol se
+        mata igual, pero entre la cosecha y el ``killpg`` queda una ventana
+        mínima en la que el ID de grupo, si el grupo ya estaba vacío, podría
+        reutilizarse. Ninguna plataforma soportada cae en este caso.
   - Windows: el hijo se asigna a un Job Object con KILL_ON_JOB_CLOSE (vía
     ctypes, sin comandos externos); terminar el job mata a todos sus
     procesos. Limitación: un subproceso lanzado en los primeros instantes,
@@ -19,6 +27,7 @@
 from __future__ import annotations
 
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -108,6 +117,7 @@ def run_bounded(
         close_fds=True,
         **kwargs,
     )
+    watcher = _ExitWatcher(proc)
     job = None
     if sys.platform == "win32":
         try:
@@ -115,6 +125,7 @@ def run_bounded(
         except OSError as exc:
             proc.kill()
             proc.wait()
+            watcher.close()
             raise ProcessError(f"no se pudo crear el Job Object de Windows: {exc}") from None
 
     out, err = _Capture(max_stdout), _Capture(max_stderr)
@@ -129,7 +140,7 @@ def run_bounded(
     timed_out = cancelled = False
     deadline = started + timeout_s
     try:
-        while not _has_exited(proc):
+        while not watcher.exited():
             if time.monotonic() >= deadline:
                 timed_out = True
                 break
@@ -138,8 +149,9 @@ def run_bounded(
                 break
             time.sleep(poll_interval_s)
     finally:
-        _kill_tree(proc, job, graceful=not _has_exited(proc))
+        _kill_tree(proc, job, watcher, graceful=not watcher.exited())
         proc.wait()  # recién acá se cosecha al líder
+        watcher.close()
         if job is not None:
             job.close()
         for t in threads:
@@ -169,17 +181,61 @@ def _feed(stream: IO[bytes], data: bytes) -> None:
             pass
 
 
-def _has_exited(proc: subprocess.Popen) -> bool:
-    """True si el proceso terminó. En POSIX no lo cosecha (ver docstring del módulo)."""
+def _exit_mode() -> str:
+    """Cómo detectar la salida del hijo. Por funcionalidad disponible, no por nombre de SO."""
     if os.name != "posix":
-        return proc.poll() is not None
-    try:
-        return os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
-    except ChildProcessError:
-        return True
+        return "poll"  # Windows: el Job Object cubre el árbol; cosechar antes no importa
+    if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+        return "waitid"
+    if hasattr(select, "kqueue"):
+        return "kqueue"
+    return "poll"
 
 
-def _kill_tree(proc: subprocess.Popen, job: _WindowsJob | None, graceful: bool) -> None:
+class _ExitWatcher:
+    """Detecta que el hijo terminó. En los modos waitid y kqueue no lo cosecha."""
+
+    def __init__(self, proc: subprocess.Popen, mode: str | None = None):
+        self._proc = proc
+        self.mode = _exit_mode() if mode is None else mode
+        self._exited = False
+        self._kq = None
+        if self.mode == "kqueue":
+            self._kq = select.kqueue()
+            event = select.kevent(
+                proc.pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            try:
+                self._kq.control([event], 0, 0)
+            except ProcessLookupError:
+                # Ya terminó antes de registrarlo. No puede ser otro proceso con el
+                # mismo PID: el hijo todavía no fue cosechado, sigue siendo un zombie.
+                self._exited = True
+
+    def exited(self) -> bool:
+        if self._exited:
+            return True
+        if self.mode == "waitid":
+            try:
+                self._exited = os.waitid(os.P_PID, self._proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+            except ChildProcessError:
+                self._exited = True
+        elif self.mode == "kqueue":
+            self._exited = bool(self._kq.control(None, 1, 0))
+        else:
+            self._exited = self._proc.poll() is not None
+        return self._exited
+
+    def close(self) -> None:
+        if self._kq is not None:
+            self._kq.close()
+            self._kq = None
+
+
+def _kill_tree(proc: subprocess.Popen, job: _WindowsJob | None, watcher: _ExitWatcher, graceful: bool) -> None:
     """Mata todo el árbol. Con ``graceful`` primero pide terminar (solo POSIX)."""
     if job is not None:
         job.terminate()
@@ -187,7 +243,7 @@ def _kill_tree(proc: subprocess.Popen, job: _WindowsJob | None, graceful: bool) 
     if graceful:
         _killpg(proc.pid, signal.SIGTERM)
         end = time.monotonic() + _TERM_GRACE_S
-        while not _has_exited(proc) and time.monotonic() < end:
+        while not watcher.exited() and time.monotonic() < end:
             time.sleep(0.05)
     _killpg(proc.pid, signal.SIGKILL)
 

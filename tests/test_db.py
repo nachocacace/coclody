@@ -117,7 +117,7 @@ def test_workdir_normalization(value, expected):
 
 
 @pytest.mark.parametrize(
-    "value", ["/etc", "../fuera", "a/../../b", r"C:\Windows", "C:proj", r"\\server\share", "a/b:c", "a\x00b", "x" * 501]
+    "value", ["/etc", "../fuera", "a/../../b", r"C:\Windows", "C:proj", r"\\server\share", "a/b:c", "a\x00b", pytest.param("x" * 501, id="demasiado-largo")]
 )
 def test_workdir_rejects_escapes(value):
     with pytest.raises(ValidationError):

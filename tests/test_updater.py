@@ -202,7 +202,8 @@ def test_manifest_altered_after_signing_is_rejected(key, exe, updates_dir, tampe
 
 @pytest.mark.parametrize(
     "signature",
-    [b"", b"no-es-base64!!", base64.b64encode(b"corta"), base64.b64encode(b"x" * 64), b"A" * 2000],
+    [b"", b"no-es-base64!!", base64.b64encode(b"corta"), base64.b64encode(b"x" * 64),
+     pytest.param(b"A" * 2000, id="demasiado-grande")],
 )
 def test_bad_signature_files(key, exe, updates_dir, signature):
     release = Release(key)
@@ -446,7 +447,7 @@ def test_parse_manifest_ok():
         good(version="01.2.3"), good(version="1.2.3-beta"), good(platform="linux-x64"), good(asset="../x.exe"),
         good(asset="dir/coclody.exe"), good(asset=".hidden"), good(size=0), good(size=-1), good(size="10"),
         good(size=True), good(size=10**12), good(sha256="A" * 64), good(sha256="a" * 63), good(extra=1),
-        b"no json", b"[]", b"\xff", json.dumps({"schema": 1}).encode(), b" " * 20000,
+        b"no json", b"[]", b"\xff", json.dumps({"schema": 1}).encode(), pytest.param(b" " * 20000, id="demasiado-grande"),
     ],
 )
 def test_parse_manifest_rejects(raw):
