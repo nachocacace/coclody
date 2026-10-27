@@ -2,6 +2,10 @@
 
 - Teclado fijo (``MAIN_KEYBOARD``): sus botones mandan un mensaje de texto
   común con la etiqueta, que ``app.on_text`` reconoce por coincidencia exacta.
+  Va en todo mensaje del bot que no lleve otros botones, así se mantiene.
+- Menú de comandos (``BOT_COMMANDS``): se registra al arrancar solo para los
+  chats de la lista blanca, así está desde el principio, antes de cualquier
+  mensaje. Un chat que no está en la lista no ve ningún menú.
 - Botones inline: mandan un ``callback_query`` con un ``callback_data`` corto.
   Formato (siempre validado con fullmatch, nunca interpretado de otra forma):
 
@@ -18,7 +22,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram import BotCommand, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 
 from coclody.db.repo import Question
 
@@ -31,6 +35,15 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [[BUTTON_NEW, BUTTON_LIST], [BUTTON_HELP]], resize_keyboard=True, is_persistent=True
 )
 NEW_TASK_PROMPT = ForceReply(input_field_placeholder="Título de la tarea")
+BOT_COMMANDS = (
+    BotCommand("nueva", "Crear una tarea: /nueva <título>"),
+    BotCommand("lista", "Ver la cola de tareas"),
+    BotCommand("estado", "Detalle de una tarea: /estado <id>"),
+    BotCommand("responder", "Responder una pregunta: /responder <id> <texto>"),
+    BotCommand("cancelar", "Cancelar una tarea: /cancelar <id>"),
+    BotCommand("reintentar", "Reintentar una tarea que falló"),
+    BotCommand("ayuda", "Ayuda y botones"),
+)
 
 YES, NO = "sí", "no"
 _TASK_RE = re.compile(r"t:([cr]):([1-9][0-9]{0,15})")

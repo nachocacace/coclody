@@ -34,7 +34,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from telegram import ForceReply, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup, Update
+from telegram import (
+    BotCommandScopeChat,
+    ForceReply,
+    InlineKeyboardMarkup,
+    MenuButtonCommands,
+    Message,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
@@ -55,6 +63,7 @@ from coclody.orchestrator.worker import CANCEL_SHUTDOWN, Worker
 from coclody.security import ChatGuard
 from coclody.telegram_bot.commands import Commands, clip, parse_task_id
 from coclody.telegram_bot.keyboards import (
+    BOT_COMMANDS,
     BUTTON_HELP,
     BUTTON_LIST,
     BUTTON_NEW,
@@ -267,7 +276,9 @@ def _reply_with(fn):
             reply = Reply(reply)
         if reply is None or not reply.text:
             return
-        sent = await update.effective_message.reply_text(clip(reply.text), reply_markup=reply.markup)
+        # Sin otros botones, va el teclado fijo: así sigue visible en cada respuesta.
+        markup = reply.markup if reply.markup is not None else MAIN_KEYBOARD
+        sent = await update.effective_message.reply_text(clip(reply.text), reply_markup=markup)
         if reply.on_sent is not None:
             reply.on_sent(sent)
 
@@ -297,7 +308,7 @@ async def _on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await query.edit_message_reply_markup(reply_markup=None)
         except TelegramError as exc:
             log.warning("No se pudieron sacar los botones del mensaje: %s", exc)
-    await context.bot.send_message(chat_id=chat_id, text=clip(text))
+    await context.bot.send_message(chat_id=chat_id, text=clip(text), reply_markup=MAIN_KEYBOARD)
 
 
 def replied_message_id(message, chat_id: int) -> int | None:
@@ -352,8 +363,27 @@ def _permitted(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 # --- bucles en segundo plano -------------------------------------------------------
 
 
+async def setup_menu(bot, allowed_chat_ids) -> int:
+    """Registra el menú de comandos en cada chat de la lista blanca. Devuelve en cuántos quedó.
+
+    Es por chat (BotCommandScopeChat), no global: quien no está en la lista no
+    ve los comandos. Un error (sin red, o un chat que nunca le escribió al bot)
+    se registra y no impide arrancar.
+    """
+    done = 0
+    for chat_id in sorted(allowed_chat_ids):
+        try:
+            await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeChat(chat_id))
+            await bot.set_chat_menu_button(chat_id=chat_id, menu_button=MenuButtonCommands())
+            done += 1
+        except TelegramError as exc:
+            log.warning("No se pudo registrar el menú de comandos en el chat %s: %s", chat_id, exc)
+    return done
+
+
 async def _post_init(app: Application) -> None:
     services: Services = app.bot_data["services"]
+    await setup_menu(app.bot, services.config.telegram.allowed_chat_ids)
     services.stop = asyncio.Event()
     services.background = [
         asyncio.create_task(_worker_loop(services), name="coclody-worker"),
@@ -435,7 +465,7 @@ async def announce_update(bot, services: Services, result: UpdateResult) -> None
     prefix = "⬆️ " if result.status == "installed" else "ℹ️ "
     for chat_id in sorted(services.config.telegram.allowed_chat_ids):
         try:
-            await bot.send_message(chat_id=chat_id, text=prefix + result.message)
+            await bot.send_message(chat_id=chat_id, text=prefix + result.message, reply_markup=MAIN_KEYBOARD)
         except Exception as exc:
             log.warning("No se pudo avisar la actualización al chat %s: %s", chat_id, exc)
 

@@ -141,8 +141,10 @@ Hacé una tabla con fecha, proveedor y monto en un archivo resumen.csv
 
 Para no escribir comandos desde el celular:
 
-- **Teclado fijo** (aparece con `/start` o `/ayuda`): **➕ Nueva tarea**, **📋 Ver cola** y **❓ Ayuda**. Con *Nueva tarea*, el bot te pide el título: escribilo como respuesta a ese mensaje (Telegram abre la respuesta solo). Las líneas debajo del título son la descripción.
+- **Menú de comandos**: el botón **Menú** junto al cuadro de texto lista los comandos desde que CoClody arranca, sin escribir nada. Solo lo ven los chats de la lista blanca.
+- **Teclado fijo**: **➕ Nueva tarea**, **📋 Ver cola** y **❓ Ayuda**. Viene en cada mensaje del bot que no trae otros botones, así que queda siempre a mano. La primera vez que abrís el bot, Telegram muestra **Iniciar**: tocalo, porque un bot no puede mandarte nada (ni el teclado) antes de que le escribas. Con *Nueva tarea*, el bot te pide el título: escribilo como respuesta a ese mensaje (Telegram abre la respuesta solo). Las líneas debajo del título son la descripción.
 - **En cada tarea**: el mensaje de creación, `/estado` y `/lista` traen **✖ Cancelar** en las tareas activas y **↻ Reintentar** en las que fallaron. El aviso de una tarea fallida también trae **↻ Reintentar**.
+- **Estados**: ⏳ en cola · ⚙️ ejecutando · ❓ esperando respuesta · ✅ terminada · ❌ falló · 🚫 cancelada. Son los mismos en `/lista`, `/estado` y los avisos.
 - **Preguntas de sí o no**: si Claude marca la pregunta como de sí/no, el mensaje trae **Sí** y **No**. Igual podés responder con texto si querés aclarar algo.
 
 ## Actualizaciones

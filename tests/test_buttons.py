@@ -237,7 +237,7 @@ def test_new_task_shows_cancel_button_and_it_works(env):
     pressed, again = run(scenario())
     assert [name for name, _ in pressed] == ["answerCallbackQuery", "sendMessage"]
     assert texts(pressed) == ["Cancelé la tarea #1."]
-    assert texts(again) == ["La tarea #1 ya terminó (cancelada)."]
+    assert texts(again) == ["La tarea #1 ya terminó (🚫 cancelada)."]
     assert repo.get_task(env.conn, 1).status == "cancelled"
 
 
@@ -282,7 +282,7 @@ def test_list_and_status_offer_buttons_per_task(env):
     texts_ = [b["text"] for row in markup(listing)["inline_keyboard"] for b in row]
     assert texts_ == [f"✖ Cancelar #{a.id}", f"↻ Reintentar #{b.id}"]
     assert inline_data(status_a) == [f"t:c:{a.id}"]
-    assert markup(status_missing) is None
+    assert inline_data(status_missing) == [] and "keyboard" in markup(status_missing)  # solo el teclado fijo
 
 
 # --- Sí/No en preguntas --------------------------------------------------------------------------------
@@ -342,7 +342,7 @@ def test_open_question_has_no_yes_no_buttons(env):
         return params
 
     params = run(scenario())
-    assert markup(params) is None and "Tocá Sí o No" not in params["text"]
+    assert inline_data(params) == [] and "Tocá Sí o No" not in params["text"]
     assert repo.list_questions(env.conn, 1)[0].kind == "open"
 
 
@@ -396,7 +396,7 @@ def test_keyboard_list_and_help(env):
         return texts(listing), texts(help_)
 
     listing, help_ = run(scenario())
-    assert "#1 [en cola] una" in listing[0]
+    assert "⏳ #1 una · en cola" in listing[0]
     assert "/nueva" in help_[0]
 
 
@@ -446,5 +446,5 @@ def test_keyboard_label_sent_as_reply_to_a_question_is_not_an_answer(env):
         return texts(calls)
 
     (reply,) = run(scenario())
-    assert "#1 [esperando respuesta] limpiar" in reply
+    assert "❓ #1 limpiar · esperando respuesta" in reply
     assert repo.list_questions(env.conn, 1)[0].status == "open"

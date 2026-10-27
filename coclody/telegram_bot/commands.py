@@ -34,6 +34,22 @@ STATUS_LABELS = {
     "failed": "falló",
     "cancelled": "cancelada",
 }
+# Un emoji por estado, el mismo en /lista, /estado, las respuestas y las notificaciones.
+STATUS_EMOJI = {
+    "pending": "📝",
+    "queued": "⏳",
+    "running": "⚙️",
+    "waiting_input": "❓",
+    "done": "✅",
+    "failed": "❌",
+    "cancelled": "🚫",
+}
+WORD_JOINER = "\u2060"
+# Caracteres a partir de los cuales Telegram arma links solo, aun en texto plano: dominios y URLs
+# (README.md, https://…), menciones (@x), hashtags (#x), cashtags ($X) y comandos (/x, que además
+# se podrían tocar y mandar). Un WORD JOINER (invisible, sin ancho) después de cada uno corta la
+# detección sin cambiar lo que se ve.
+_AUTOLINK_RE = re.compile(r"([.@#$/:])(?=\S)")
 
 HELP = """\
 CoClody: tareas para Claude Code.
@@ -45,6 +61,8 @@ CoClody: tareas para Claude Code.
 /cancelar <id>: cancela una tarea
 /reintentar <id>: vuelve a poner en cola una tarea que falló
 /ayuda: esta ayuda
+
+Estados: ⏳ en cola · ⚙️ ejecutando · ❓ esperando respuesta · ✅ terminada · ❌ falló · 🚫 cancelada
 
 También podés usar los botones de abajo (Nueva tarea, Ver cola, Ayuda) y los que aparecen en cada tarea y en las preguntas de sí o no."""
 
@@ -61,7 +79,20 @@ def parse_task_id(raw: str) -> int | None:
 
 
 def label(status: str) -> str:
-    return STATUS_LABELS.get(status, status)
+    """Estado para mostrar, con su emoji: "⏳ en cola"."""
+    text = STATUS_LABELS.get(status, status)
+    emoji = STATUS_EMOJI.get(status)
+    return f"{emoji} {text}" if emoji else text
+
+
+def no_autolink(text: str) -> str:
+    """El texto tal cual se ve, pero sin que Telegram lo convierta en links, menciones o comandos."""
+    return _AUTOLINK_RE.sub(lambda m: m.group(1) + WORD_JOINER, text)
+
+
+def task_title(task: Task, limit: int | None = None) -> str:
+    """Título de una tarea para un mensaje: recortado (si se pide) y sin autolinks."""
+    return no_autolink(clip(task.title, limit) if limit else task.title)
 
 
 class Commands:
@@ -123,7 +154,7 @@ class Commands:
                 task = repo.transition_task(conn, task.id, "queued", expected="pending")
         except RepoError as exc:
             return f"No pude crear la tarea: {exc}", None
-        return f"Creé la tarea #{task.id}: {task.title}\nQuedó en cola.", task.id
+        return f"Creé la tarea #{task.id}: {task_title(task)}\nQuedó en cola.", task.id
 
     def remember_task_prompt(self, chat_id: int, message_id: int) -> None:
         with self._prompts_lock:
@@ -150,13 +181,13 @@ class Commands:
             runs = repo.list_runs(conn, task.id)
             events = repo.list_events(conn, task.id, limit=1000)[-5:]
         lines = [
-            f"#{task.id} {task.title}",
+            f"#{task.id} {task_title(task)}",
             f"Estado: {label(task.status)}",
             f"Carpeta: {task.workdir_rel or '(raíz de trabajo)'}",
             f"Creada: {task.created_at} UTC · actualizada: {task.updated_at} UTC",
         ]
         if task.description:
-            lines.append(f"\nDescripción:\n{clip(task.description, 1000)}")
+            lines.append(f"\nDescripción:\n{no_autolink(clip(task.description, 1000))}")
         for q in open_questions:
             lines.append(f"\nPregunta pendiente:\n{q.question}\n(respondé con /responder {task.id} <texto>)")
         if runs:
@@ -293,4 +324,6 @@ class Commands:
 
 
 def _line(task: Task) -> str:
-    return f"#{task.id} [{label(task.status)}] {clip(task.title, 80)}"
+    # El emoji primero, para distinguir los estados de un vistazo.
+    emoji, text = STATUS_EMOJI.get(task.status, "•"), STATUS_LABELS.get(task.status, task.status)
+    return f"{emoji} #{task.id} {task_title(task, 80)} · {text}"

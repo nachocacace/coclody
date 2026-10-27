@@ -106,7 +106,7 @@ def test_new_task_and_list(cmds, conn):
     assert "Creé la tarea #1" in reply and "cola" in reply
     t = repo.get_task(conn, 1)
     assert (t.title, t.description, t.status, t.created_by) == ("Arreglar login", "El botón no responde\nen Safari", "queued", ME)
-    assert "#1 [en cola] Arreglar login" in cmds.list_tasks()
+    assert "⏳ #1 Arreglar login · en cola" in cmds.list_tasks()
 
 
 def test_new_task_validation(cmds, conn):
@@ -120,7 +120,7 @@ def test_list_empty_and_finished(cmds, conn):
     t = repo.create_task(conn, "vieja")
     repo.transition_task(conn, t.id, "cancelled")
     text = cmds.list_tasks()
-    assert "No hay tareas activas" in text and "#1 [cancelada] vieja" in text
+    assert "No hay tareas activas" in text and "🚫 #1 vieja · cancelada" in text
 
 
 def test_status(cmds, conn):
@@ -170,7 +170,7 @@ def test_cancel_queued_and_waiting(cmds, conn):
     b = to_waiting(conn, queued_task(conn))
     assert cmds.cancel(f"#{b.id}") == f"Cancelé la tarea #{b.id}."
     assert repo.list_open_questions(conn, task_id=b.id) == []
-    assert "ya terminó (cancelada)" in cmds.cancel(str(a.id))
+    assert "ya terminó (🚫 cancelada)" in cmds.cancel(str(a.id))
     assert cmds.cancel("77") == "No existe la tarea #77."
 
 
@@ -199,7 +199,7 @@ def test_bot_end_to_end_commands(services, conn):
             (reply,) = await h.send(ME, "/nueva Preparar informe\nCon gráficos")
             assert "Creé la tarea #1" in reply
             (reply,) = await h.send(ME, "/lista")
-            assert "#1 [en cola] Preparar informe" in reply
+            assert "⏳ #1 Preparar informe · en cola" in reply
             (reply,) = await h.send(BRO, "/estado@coclody_test_bot 1")
             assert "Preparar informe" in reply
             (reply,) = await h.send(ME, "/cancelar 1")

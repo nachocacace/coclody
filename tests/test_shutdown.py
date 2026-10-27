@@ -133,3 +133,5 @@ def test_normal_stop_cleans_up_once(setup, monkeypatch):
     assert_cleaned_up(services, claude, conn, api)
     # Una sola limpieza: post_stop la hace y la de run_polling no repite el envío final.
     assert calls.count(True) == 1
+    # Al arrancar (post_init) se registró el menú de comandos del chat autorizado.
+    assert [p["scope"] for p in api.called("setMyCommands")] == [{"type": "chat", "chat_id": ME}]

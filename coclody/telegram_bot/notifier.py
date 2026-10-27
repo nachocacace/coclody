@@ -30,8 +30,8 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 
 from coclody.db import DbFactory, repo
 from coclody.db.repo import Question, Run, Task, TaskEvent
-from coclody.telegram_bot.commands import clip
-from coclody.telegram_bot.keyboards import question_buttons, task_buttons
+from coclody.telegram_bot.commands import STATUS_EMOJI, clip, task_title
+from coclody.telegram_bot.keyboards import MAIN_KEYBOARD, question_buttons, task_buttons
 
 log = logging.getLogger(__name__)
 
@@ -47,17 +47,19 @@ class _Pending:
 
 
 def format_done(task: Task, run: Run | None) -> str:
-    return clip(f"✅ Tarea #{task.id} terminada: {task.title}\n\n{_summary(run)}")
+    return clip(f"{STATUS_EMOJI['done']} Tarea #{task.id} terminada: {task_title(task)}\n\n{_summary(run)}")
 
 
 def format_failed(task: Task, run: Run | None) -> str:
-    return clip(f"❌ Tarea #{task.id} falló: {task.title}\n\n{_summary(run)}\n\nDetalle: /estado {task.id}")
+    return clip(
+        f"{STATUS_EMOJI['failed']} Tarea #{task.id} falló: {task_title(task)}\n\n{_summary(run)}\n\nDetalle: /estado {task.id}"
+    )
 
 
 def format_question(task: Task, question: Question) -> str:
     buttons = "Tocá Sí o No, o respondé con texto: " if question.kind == "yes_no" else "Para responder: "
     return clip(
-        f"❓ La tarea #{task.id} ({task.title}) necesita un dato:\n\n{question.question}\n\n"
+        f"{STATUS_EMOJI['waiting_input']} La tarea #{task.id} ({task_title(task)}) necesita un dato:\n\n{question.question}\n\n"
         f"{buttons}mantené apretado este mensaje → Responder, o mandá /responder {task.id} <respuesta>. "
         "Si contestás desde la notificación, Telegram no lo toma como respuesta a este mensaje."
     )
@@ -98,7 +100,7 @@ async def _deliver(bot: Bot, db: DbFactory, item: _Pending, recipients: list[int
             if (chat_id, part) in item.delivered:
                 continue
             try:
-                sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+                sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup or MAIN_KEYBOARD)
             except (Forbidden, BadRequest) as exc:
                 log.warning("Telegram rechazó la notificación al chat %s: %s", chat_id, exc)
                 await asyncio.to_thread(_record, db, item.event.id, chat_id, part, "rejected", None)
