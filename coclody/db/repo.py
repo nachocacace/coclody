@@ -67,6 +67,11 @@ class Task:
     created_at: str
     updated_at: str
     finished_at: str | None
+    # v6 (orquestador): NULL/"user" en el modo de un solo worker.
+    project_id: int | None = None
+    worker: str | None = None
+    origin: str = "user"
+    brain_decision_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -158,7 +163,9 @@ def list_tasks(conn: sqlite3.Connection, statuses: Iterable[str] | None = None, 
 
 def next_queued_task(conn: sqlite3.Connection) -> Task | None:
     row = conn.execute(
-        "SELECT * FROM tasks WHERE status = 'queued' ORDER BY priority DESC, id ASC LIMIT 1"
+        # Solo tareas sin worker: las del orquestador corren en su worktree, nunca en la raíz de trabajo
+        # (p. ej. si se desactiva el modo v2 con tareas de un worker todavía en cola).
+        "SELECT * FROM tasks WHERE status = 'queued' AND worker IS NULL ORDER BY priority DESC, id ASC LIMIT 1"
     ).fetchone()
     return Task(**dict(row)) if row else None
 

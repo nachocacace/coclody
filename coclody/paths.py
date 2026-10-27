@@ -57,6 +57,11 @@ class AppPaths:
     def updates_dir(self) -> Path:
         return self.data_dir / "updates"
 
+    @property
+    def git_hooks_dir(self) -> Path:
+        """Carpeta vacía que CoClody usa como core.hooksPath: ningún hook de un repo se ejecuta."""
+        return self.data_dir / "git-hooks-vacio"
+
     @classmethod
     def under(cls, root: Path) -> AppPaths:
         """Todo bajo una misma raíz (tests, o instalaciones portables a futuro)."""

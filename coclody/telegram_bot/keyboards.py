@@ -44,6 +44,11 @@ BOT_COMMANDS = (
     BotCommand("reintentar", "Reintentar una tarea que falló"),
     BotCommand("ayuda", "Ayuda y botones"),
 )
+# Solo con el orquestador (modo v2) activado.
+ORCHESTRATOR_COMMANDS = (
+    BotCommand("proyectos", "Listar los proyectos"),
+    BotCommand("proyecto", "Cambiar de proyecto: /proyecto <nombre>"),
+)
 
 YES, NO = "sí", "no"
 _TASK_RE = re.compile(r"t:([cr]):([1-9][0-9]{0,15})")

@@ -65,11 +65,14 @@ from telegram.request import BaseRequest
 
 from coclody.config import Config
 from coclody.db import DbFactory
+from coclody.orchestrator import projects as project_ops
+from coclody.orchestrator.gitops import Git, GitError
 from coclody.orchestrator.worker import CANCEL_SHUTDOWN, Worker
 from coclody.security import ChatGuard
 from coclody.telegram_bot.commands import Commands, outgoing, parse_task_id
 from coclody.telegram_bot.keyboards import (
     BOT_COMMANDS,
+    ORCHESTRATOR_COMMANDS,
     BUTTON_HELP,
     BUTTON_LIST,
     BUTTON_NEW,
@@ -106,6 +109,7 @@ class Services:
     guard: ChatGuard
     commands: Commands = field(init=False)
     updater: Updater | None = None
+    git: Git | None = None  # solo con el orquestador activado
     announced_versions: set[str] = field(default_factory=set)
     stop: asyncio.Event | None = None
     background: list[asyncio.Task] = field(default_factory=list)
@@ -169,6 +173,8 @@ def build_application(
         (("responder",), lambda u: c.answer(u.effective_chat.id, _args(u))),
         (("cancelar",), lambda u: c.cancel(_args(u))),
         (("reintentar",), lambda u: c.retry(_args(u))),
+        (("proyectos",), lambda u: list_projects(services)),
+        (("proyecto",), lambda u: switch_project(services, _args(u))),
     ):
         app.add_handler(CommandHandler(list(names), _reply_with(fn), filters=only_new))
 
@@ -377,7 +383,47 @@ def _permitted(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 # --- bucles en segundo plano -------------------------------------------------------
 
 
-async def setup_menu(bot, allowed_chat_ids) -> int:
+def list_projects(services: Services) -> str:
+    if not services.config.orchestrator.enabled:
+        return ORCHESTRATOR_OFF
+    from coclody.db import projects as prepo
+
+    with services.db() as conn:
+        rows = prepo.list_projects(conn)
+    if not rows:
+        return "No hay proyectos. Se agregan desde la computadora: coclody proyecto agregar <nombre> <ruta>"
+    lines = [f"{'▶' if p.active else '•'} {p.name}{' (activo)' if p.active else ''}" for p in rows]
+    return "Proyectos:\n" + "\n".join(lines) + "\n\nCambiar: /proyecto <nombre>"
+
+
+def switch_project(services: Services, arg: str) -> str:
+    """Cambia el proyecto activo. No cambia nada si hay tareas ejecutándose o si un worktree no sirve."""
+    if not services.config.orchestrator.enabled:
+        return ORCHESTRATOR_OFF
+    name = arg.strip()
+    if not name:
+        return "Uso: /proyecto <nombre>. Mirá cuáles hay con /proyectos."
+    if services.git is None:
+        return "git no está disponible; revisá `coclody check` en la computadora."
+    try:
+        activation = project_ops.activate(services.db, services.git, services.config, name)
+    except project_ops.ProjectError as exc:
+        lines = [f"No cambié de proyecto: {exc}."]
+        lines += [f"- {r.spec.name}: {r.problem}" for r in exc.reports if r.problem]
+        return "\n".join(lines)
+    except GitError as exc:
+        return f"No cambié de proyecto: {exc}"
+    created = [r.spec.name for r in activation.reports if r.status == "created"]
+    text = f"Proyecto activo: {activation.project.name} (rama base {activation.project.base_branch})."
+    if created:
+        text += f"\nCreé los worktrees: {', '.join(created)}."
+    return text
+
+
+ORCHESTRATOR_OFF = "El modo orquestador no está activado ([orquestador] enabled = false en la configuración)."
+
+
+async def setup_menu(bot, allowed_chat_ids, orchestrator: bool = False) -> int:
     """Registra el menú de comandos en cada chat de la lista blanca. Devuelve en cuántos quedó.
 
     Es por chat (BotCommandScopeChat), no global: quien no está en la lista no
@@ -387,7 +433,8 @@ async def setup_menu(bot, allowed_chat_ids) -> int:
     done = 0
     for chat_id in sorted(allowed_chat_ids):
         try:
-            await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeChat(chat_id))
+            commands = BOT_COMMANDS + (ORCHESTRATOR_COMMANDS if orchestrator else ())
+            await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id))
             await bot.set_chat_menu_button(chat_id=chat_id, menu_button=MenuButtonCommands())
             done += 1
         except TelegramError as exc:
@@ -397,7 +444,7 @@ async def setup_menu(bot, allowed_chat_ids) -> int:
 
 async def _post_init(app: Application) -> None:
     services: Services = app.bot_data["services"]
-    await setup_menu(app.bot, services.config.telegram.allowed_chat_ids)
+    await setup_menu(app.bot, services.config.telegram.allowed_chat_ids, services.config.orchestrator.enabled)
     services.stop = asyncio.Event()
     services.background = [
         asyncio.create_task(_worker_loop(services), name="coclody-worker"),

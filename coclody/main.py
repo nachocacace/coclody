@@ -20,6 +20,41 @@ from coclody.updater.installer import cleanup_previous
 log = logging.getLogger("coclody")
 
 
+def prepare_orchestrator(cfg, paths, db):
+    """Con el orquestador activado: busca git y deja listos los worktrees del proyecto activo.
+
+    Un problema se registra como ERROR y no impide arrancar: el bot sigue
+    respondiendo (p. ej. para cambiar de proyecto con /proyecto).
+    """
+    if not cfg.orchestrator.enabled:
+        return None
+    from coclody.db import projects as prepo
+    from coclody.orchestrator import projects as project_ops
+    from coclody.orchestrator.gitops import Git, GitError
+
+    try:
+        git = Git.find(cfg.claude.workspace_root, paths.git_hooks_dir)
+    except GitError as exc:
+        log.error("Orquestador sin git: %s", exc)
+        return None
+    with db() as conn:
+        project = prepo.active_project(conn)
+    if project is None:
+        log.warning("Orquestador activado sin proyecto activo: `coclody proyecto activar <nombre>`")
+        return git
+    try:
+        reports = project_ops.prepare(db, git, cfg, project)
+    except project_ops.ProjectError as exc:
+        log.error("Proyecto %s: %s", project.name, exc)
+        for report in exc.reports:
+            if report.problem:
+                log.error("Worktree %s: %s", report.spec.name, report.problem)
+        return git
+    created = [r.spec.name for r in reports if r.status == "created"]
+    log.info("Proyecto activo: %s; worktrees listos%s", project.name, f" (creados: {', '.join(created)})" if created else "")
+    return git
+
+
 def run() -> int:
     """Corre el bot hasta Ctrl+C. Devuelve el código de salida."""
     try:
@@ -51,7 +86,8 @@ def run() -> int:
     if cfg.updates.enabled and cfg.updates.github_repo:
         updater = Updater(cfg.updates.github_repo, paths.updates_dir)
     services = Services(
-        config=cfg, db=db, worker=worker, guard=ChatGuard(cfg.telegram.allowed_chat_ids), updater=updater
+        config=cfg, db=db, worker=worker, guard=ChatGuard(cfg.telegram.allowed_chat_ids), updater=updater,
+        git=prepare_orchestrator(cfg, paths, db),
     )
     for warning in tool_warnings(cfg.claude.allowed_tools):
         log.warning("Herramienta ampliada respecto del default: %s", warning)

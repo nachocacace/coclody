@@ -29,6 +29,18 @@ DEFAULT_ALLOWED_TOOLS = tuple(f"{tool}{WORKSPACE_SCOPE}" for tool in ("Read", "G
 # Sin comas: --allowedTools las usa como separador.
 _TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\([^(),\r\n]*\))?$")
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+# Comandos que un worker puede correr con Bash en el modo orquestador: prefijos (tests, linters, build).
+_COMMAND_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:=+-]*( [A-Za-z0-9._/:=+-]+){0,7}")
+# Nunca en la lista: git (los commits los hace CoClody), shells, elevación de permisos, red y
+# programas que ejecutan otro comando. Un intérprete solo se acepta con un módulo o script detrás.
+FORBIDDEN_COMMANDS = frozenset({
+    "git", "gh", "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "cmd", "cmd.exe", "powershell",
+    "powershell.exe", "pwsh", "env", "sudo", "su", "doas", "runas", "ssh", "scp", "sftp", "rsync", "curl",
+    "wget", "nc", "ncat", "netcat", "telnet", "ftp", "xargs", "eval", "exec", "source", "nohup", "timeout",
+    "watch", "rm", "rmdir", "del", "chmod", "chown", "open", "start", "osascript", "crontab", "launchctl",
+    "schtasks", "docker", "kubectl",
+})
+INTERPRETERS = frozenset({"python", "python3", "py", "node", "deno", "bun", "ruby", "perl", "php"})
 _REQUIRED = object()
 
 TEMPLATE = """\
@@ -60,6 +72,34 @@ enabled = false
 # Repo público de GitHub con los releases, formato "usuario/repo".
 # github_repo = ""
 check_interval_hours = 24
+
+[orquestador]
+# Modo v2: un cerebro coordina varios workers, cada uno en su worktree de git del proyecto activo.
+# Apagado, CoClody funciona como siempre (un worker, en la carpeta de trabajo).
+enabled = false
+workers = 3
+# Comandos que los workers pueden correr (tests, linters, build), como prefijos: "pytest", "npm test".
+# git nunca: los commits los hace CoClody. Cualquier comando que corra código del proyecto (tests,
+# build) puede hacer cualquier cosa con tus permisos: leé "Orquestador: qué está garantizado".
+worker_commands = []
+# Topes. Al tocar uno, CoClody avisa por Telegram y la autonomía queda en pausa.
+brain_calls_per_hour = 6
+brain_calls_per_day = 40
+autonomous_tasks_per_day = 20
+max_queue_per_worker = 3
+# Simulacro: el cerebro decide y te muestra qué haría, sin ejecutar nada.
+brain_dry_run = true
+prompt_budget_chars = 48000
+# Resumen periódico (mecánico, sin costo): cada N tareas o M minutos con actividad. 0 lo apaga.
+digest_every_tasks = 5
+digest_every_minutes = 120
+# Aviso de "cambio grande" en una tarea.
+big_change_files = 20
+big_change_lines = 1000
+# Web local de solo lectura (127.0.0.1, con token en la URL).
+web_enabled = false
+web_port = 8765
+audit_retention_days = 90
 """
 
 
@@ -94,10 +134,31 @@ class UpdatesConfig:
 
 
 @dataclass(frozen=True)
+class OrchestratorConfig:
+    enabled: bool = False
+    workers: int = 3
+    worker_commands: tuple[str, ...] = ()
+    brain_calls_per_hour: int = 6
+    brain_calls_per_day: int = 40
+    autonomous_tasks_per_day: int = 20
+    max_queue_per_worker: int = 3
+    brain_dry_run: bool = True
+    prompt_budget_chars: int = 48_000
+    digest_every_tasks: int = 5
+    digest_every_minutes: int = 120
+    big_change_files: int = 20
+    big_change_lines: int = 1000
+    web_enabled: bool = False
+    web_port: int = 8765
+    audit_retention_days: int = 90
+
+
+@dataclass(frozen=True)
 class Config:
     telegram: TelegramConfig
     claude: ClaudeConfig
     updates: UpdatesConfig
+    orchestrator: OrchestratorConfig = OrchestratorConfig()
 
 
 _SCHEMA = {
@@ -111,6 +172,33 @@ _SCHEMA = {
         "max_stderr_bytes",
     },
     "updates": {"enabled", "github_repo", "check_interval_hours"},
+    "orquestador": {
+        "enabled", "workers", "worker_commands", "brain_calls_per_hour", "brain_calls_per_day",
+        "autonomous_tasks_per_day", "max_queue_per_worker", "brain_dry_run", "prompt_budget_chars",
+        "digest_every_tasks", "digest_every_minutes", "big_change_files", "big_change_lines", "web_enabled",
+        "web_port", "audit_retention_days",
+    },
+}
+
+# Clave → (validador, default) de [orquestador]. Los rangos son los límites duros: ni el cerebro ni
+# Telegram pueden cambiarlos, solo este archivo.
+_ORCH = {
+    "enabled": (lambda: _bool, False),
+    "workers": (lambda: _int_between(1, 8), 3),
+    "worker_commands": (lambda: _commands, []),
+    "brain_calls_per_hour": (lambda: _int_between(1, 60), 6),
+    "brain_calls_per_day": (lambda: _int_between(1, 500), 40),
+    "autonomous_tasks_per_day": (lambda: _int_between(0, 500), 20),
+    "max_queue_per_worker": (lambda: _int_between(1, 20), 3),
+    "brain_dry_run": (lambda: _bool, True),
+    "prompt_budget_chars": (lambda: _int_between(8_000, 200_000), 48_000),
+    "digest_every_tasks": (lambda: _int_between(0, 1000), 5),
+    "digest_every_minutes": (lambda: _int_between(0, 24 * 60), 120),
+    "big_change_files": (lambda: _int_between(1, 100_000), 20),
+    "big_change_lines": (lambda: _int_between(1, 10_000_000), 1000),
+    "web_enabled": (lambda: _bool, False),
+    "web_port": (lambda: _int_between(1024, 65535), 8765),
+    "audit_retention_days": (lambda: _int_between(1, 3650), 90),
 }
 
 
@@ -145,6 +233,11 @@ def load_config(paths: AppPaths, path: Path | None = None) -> Config:
     interval = v.get(up, "updates.check_interval_hours", _int_between(1, 24 * 30), default=24)
     if enabled is True and repo is None and "github_repo" not in up:
         v.error("updates.github_repo", "es obligatorio si updates.enabled = true")
+    orch_raw = sections["orquestador"]
+    orch = {
+        key: v.get(orch_raw, f"orquestador.{key}", check(), default=default)
+        for key, (check, default) in _ORCH.items()
+    }
 
     if v.problems:
         raise ConfigError(path, v.problems)
@@ -159,6 +252,7 @@ def load_config(paths: AppPaths, path: Path | None = None) -> Config:
             max_stderr_bytes=max_stderr,
         ),
         updates=UpdatesConfig(enabled=enabled, github_repo=repo, check_interval_hours=interval),
+        orchestrator=OrchestratorConfig(**{**orch, "worker_commands": tuple(orch["worker_commands"])}),
     )
 
 
@@ -303,6 +397,37 @@ def _tools(value: Any) -> list[str]:
     if bad:
         raise _Invalid(f"nombres inválidos: {', '.join(map(repr, bad))}")
     return value
+
+
+def _commands(value: Any) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(c, str) for c in value):
+        raise _Invalid("tiene que ser una lista de comandos")
+    problems = []
+    for command in value:
+        problem = command_problem(command)
+        if problem:
+            problems.append(f"{command!r}: {problem}")
+    if problems:
+        raise _Invalid("; ".join(problems))
+    if len(set(value)) != len(value):
+        raise _Invalid("hay comandos repetidos")
+    return value
+
+
+def command_problem(command: str) -> str | None:
+    """Por qué un comando no puede ir en worker_commands, o None si puede."""
+    if not _COMMAND_RE.fullmatch(command):
+        return "solo letras, números, espacios simples y . _ / : = + - (sin comillas, ; | & $ ni redirecciones)"
+    words = command.split(" ")
+    first = words[0].lower().rsplit("/", 1)[-1]
+    if first in FORBIDDEN_COMMANDS:
+        return "no está permitido (git, shells, red, permisos o comandos que ejecutan otros)"
+    if first in INTERPRETERS:
+        if len(words) < 2 or words[1] in ("-c", "-e", "--eval", "-p", "--print", "-i", "-"):
+            return "un intérprete solo con un módulo o script detrás (p. ej. \"python -m pytest\")"
+        if words[1] == "-m" and (len(words) < 3 or words[2] in ("pip", "venv", "http.server")):
+            return "ese módulo no es un comando de tests, lint ni build"
+    return None
 
 
 def _repo(value: Any) -> str:

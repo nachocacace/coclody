@@ -241,6 +241,52 @@ Estos son supuestos explícitos del diseño. Si alguno no se cumple en tu caso, 
 
 ---
 
+## Orquestador (modo v2)
+
+> En construcción, por etapas. Hoy (etapa 1) están los proyectos y los worktrees; los workers en paralelo, el cerebro, los resúmenes y la web llegan en las etapas siguientes. Con `[orquestador] enabled = false` (el default), CoClody funciona exactamente como antes.
+
+Un **cerebro** (otra instancia de Claude Code que solo decide) coordina varios **workers** de Claude Code que trabajan en paralelo, cada uno en su propio worktree de git del **proyecto activo**.
+
+### Proyectos
+
+Un proyecto es un repo de git dentro de tu carpeta de trabajo, con sus worktrees, reglas y contexto. Hay uno activo por vez.
+
+```
+coclody proyecto agregar web /ruta/al/repo --activar
+coclody proyecto listar
+coclody proyecto activar web
+```
+
+Desde Telegram: `/proyectos` y `/proyecto <nombre>`. Los proyectos se **agregan** solo desde la computadora: la carpeta raíz decide qué puede tocar Claude, así que no se elige desde un chat. No se puede cambiar de proyecto con tareas ejecutándose.
+
+Al activar un proyecto, CoClody crea los worktrees que falten, dentro de la carpeta del proyecto:
+
+```
+<raíz>/.coclody/worktrees/w1   rama coclody/w1
+<raíz>/.coclody/worktrees/w2   rama coclody/w2
+...
+```
+
+Las ramas salen de la rama en la que esté la raíz al registrar el proyecto (la "rama base"). `.coclody/` se agrega a `.git/info/exclude` (local, no versionado). CoClody **nunca borra** un worktree: si bajás `workers`, el que sobra queda en disco y deja de usarse. El merge a tu rama principal lo hacés vos.
+
+### Qué está garantizado y cómo
+
+| Garantía | Cómo | Tipo |
+|---|---|---|
+| Un worker no sale de la raíz del proyecto | Los worktrees están dentro de la raíz, y la raíz dentro de `workspace_root` (verificado después de resolver symlinks; `.coclody` no puede ser un symlink) | Por construcción |
+| Un worker no toca el worktree de otro | Su carpeta de trabajo es su worktree y sus herramientas de archivos están acotadas a `./**`; los worktrees son carpetas hermanas, nunca una dentro de otra | Por construcción *(etapa 2)* |
+| Los workers no ejecutan git | git no puede estar en `worker_commands` (la config lo rechaza); los commits los hace CoClody | Por construcción, **salvo** lo de la fila siguiente |
+| Ni push, ni reset, ni rebase, ni borrar ramas o worktrees | Si `worker_commands` está vacío: por construcción (los workers no tienen cómo ejecutar nada). Si tiene comandos (tests, linters, build): esos comandos corren código del proyecto (un `conftest.py`, un script de `package.json`), que un worker puede escribir, y ese código puede ejecutar git. Ahí queda **solo por instrucción**, con mitigaciones: entorno sin credenciales, verificación de invariantes después de cada tarea y ramas de respaldo *(etapa 2)* | Construcción sin comandos; **instrucción** con comandos |
+| El git de CoClody no ejecuta código del repo | Cada llamada lleva `core.hooksPath` a una carpeta vacía (si tiene algo, no se ejecuta git), `core.fsmonitor=false`, sin paginador, y no hereda variables `GIT_*` | Por construcción |
+| El git de CoClody no habla con un remoto | `protocol.allow=never` en cada llamada | Por construcción |
+| `main` y las ramas protegidas no se tocan | Las ramas de los workers son siempre `coclody/<worker>`; `main`, `master` y la rama base se rechazan | Por construcción |
+| El cerebro no puede cambiar config, reglas, lista blanca ni nada de CoClody | Corre sin herramientas y su única salida es un JSON con esquema cerrado, sin acciones para eso *(etapa 4)* | Por construcción |
+| El cerebro trata los resúmenes de los workers como datos | Delimitados con un marcador aleatorio por invocación y la orden en su prompt *(etapa 4)* | **Solo instrucción** (la validación del esquema acota el daño) |
+
+`worker_commands` acepta solo prefijos simples (`pytest`, `python -m pytest`, `npm test`, `ruff check .`): sin comillas, `;`, `|`, `&`, `$`, redirecciones, y nunca git, shells, red, `sudo`, `env`, `xargs`, `rm` ni un intérprete suelto (`python` sin `-m` o script). `coclody check` avisa cuando la lista no está vacía.
+
+---
+
 ## Referencia de configuración
 
 `config.toml` está en `%LOCALAPPDATA%\CoClody\` (Windows) o en `~/Library/Application Support/CoClody/` (macOS).
