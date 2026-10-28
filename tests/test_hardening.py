@@ -33,21 +33,21 @@ def test_deny_tools_cover_git_pointer_and_config_files():
     assert {d.split("(")[0] for d in DENY_TOOLS} == {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 
 
-def test_build_invocation_passes_deny_and_settings():
+def test_build_invocation_passes_deny_and_settings(tmp_path):
     from coclody.config import ClaudeConfig
     from coclody.orchestrator.claude_runner import build_invocation
 
-    cfg = ClaudeConfig(workspace_root=_here(), executable="claude", allowed_tools=("Read(./**)",), timeout_minutes=5)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    exe = tmp_path / "bin" / ("claude.exe" if sys.platform == "win32" else "claude")
+    exe.parent.mkdir()
+    exe.write_bytes(b"#!/bin/sh\n")
+    exe.chmod(0o755)
+    cfg = ClaudeConfig(workspace_root=ws, executable=str(exe), allowed_tools=("Read(./**)",), timeout_minutes=5)
     inv = build_invocation(cfg, "hola", deny_tools=("Write(.git)", "Edit(**/.git/**)"), settings_json='{"sandbox": {}}')
     argv = list(inv.argv)
     assert argv[argv.index("--disallowedTools") + 1] == "Write(.git),Edit(**/.git/**)"
     assert argv[argv.index("--settings") + 1] == '{"sandbox": {}}'
-
-
-def _here():
-    from pathlib import Path
-
-    return Path(__file__).resolve().parent
 
 
 # --- hallazgo 1/3: sandbox settings ----------------------------------------------------------------------
@@ -57,10 +57,12 @@ def test_sandbox_settings_confine_to_the_worktree():
     import json
     from pathlib import Path
 
-    s = json.loads(sandbox_settings(Path("/proj"), Path("/proj/.coclody/worktrees/w1")))["sandbox"]
+    root, wt = Path("/proj"), Path("/proj/.coclody/worktrees/w1")
+    s = json.loads(sandbox_settings(root, wt))["sandbox"]
     assert s["enabled"] and s["failIfUnavailable"] and not s["allowUnsandboxedCommands"]
     assert s["network"]["allowedDomains"] == []  # red cortada del todo
-    assert s["filesystem"]["denyRead"] == ["/proj"] and s["filesystem"]["allowRead"] == ["/proj/.coclody/worktrees/w1"]
+    # Rutas con el separador de la plataforma (en Windows, "\").
+    assert s["filesystem"]["denyRead"] == [str(root)] and s["filesystem"]["allowRead"] == [str(wt)]
 
 
 def test_sandbox_available_by_platform():
