@@ -103,6 +103,9 @@ web_port = 8765
 audit_retention_days = 90
 # Tope de ejecuciones por tarea: una que falla o toca el límite en loop no se reintenta para siempre.
 max_task_runs = 5
+# Freno de mano: con true (recomendado al empezar), cada decisión del cerebro te llega por Telegram
+# para aprobar antes de ejecutarse. Ponelo en false recién cuando confíes y quieras modo autónomo.
+brain_approval = true
 """
 
 
@@ -155,6 +158,7 @@ class OrchestratorConfig:
     web_port: int = 8765
     audit_retention_days: int = 90
     max_task_runs: int = 5
+    brain_approval: bool = True
 
 
 @dataclass(frozen=True)
@@ -180,7 +184,7 @@ _SCHEMA = {
         "enabled", "workers", "worker_commands", "brain_calls_per_hour", "brain_calls_per_day",
         "autonomous_tasks_per_day", "max_queue_per_worker", "brain_dry_run", "prompt_budget_chars",
         "digest_every_tasks", "digest_every_minutes", "big_change_files", "big_change_lines", "web_enabled",
-        "web_port", "audit_retention_days", "max_task_runs",
+        "web_port", "audit_retention_days", "max_task_runs", "brain_approval",
     },
 }
 
@@ -204,6 +208,7 @@ _ORCH = {
     "web_port": (lambda: _int_between(1024, 65535), 8765),
     "audit_retention_days": (lambda: _int_between(1, 3650), 90),
     "max_task_runs": (lambda: _int_between(1, 100), 5),
+    "brain_approval": (lambda: _bool, True),
 }
 
 

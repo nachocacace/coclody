@@ -280,7 +280,24 @@ _V7 = """
 ALTER TABLE task_commits ADD COLUMN sensitive TEXT NOT NULL DEFAULT '';
 """
 
-MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4, _V5, _V6, _V7)
+# v8: freno de mano. Cuando se ejecuta de verdad con aprobación, cada decisión del cerebro espera un
+# visto bueno por Telegram antes de ejecutarse. Tabla aparte (no cambia brain_decisions): una fila
+# por decisión pendiente, con el mensaje que la ofrece y cómo se resolvió.
+_V8 = """
+CREATE TABLE brain_approvals (
+    decision_id   INTEGER NOT NULL PRIMARY KEY REFERENCES brain_decisions(id) ON DELETE CASCADE,
+    status        TEXT    NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+    chat_id       INTEGER,
+    tg_message_id INTEGER,
+    decided_by    INTEGER,
+    decided_at    TEXT,
+    created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+) STRICT;
+
+CREATE INDEX idx_brain_approvals_pending ON brain_approvals(decision_id) WHERE status = 'pending';
+"""
+
+MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4, _V5, _V6, _V7, _V8)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

@@ -612,3 +612,144 @@ def test_stopped_worker_is_skipped_until_resumed(env):
     assert run_once(services, "w1") is None  # detenido: no toma la tarea
     prepo.set_worker_state(conn, project.id, "w1", "idle")
     assert run_once(services, "w1").status == "done"
+
+
+# --- etapa 5: eventos del cerebro, aprobación por Telegram, respuesta a preguntas -------------------------
+
+
+def test_worker_events_wake_the_brain(env):
+    from coclody.db import repo
+
+    build, root, conn = env
+    services, claude = build(action=write_file("x.txt"))
+    pid = prepo.active_project(conn).id
+
+    queue(conn, "una", "w1")
+    run_once(services, "w1")  # done + cola vacía → worker_idle
+    kinds = [e["kind"] for e in repo.pending_brain_events(conn, pid)]
+    assert "worker_idle" in kinds
+
+    # Una tarea que falla deja un evento task_failed.
+    services.worker.runner = lambda inv, cancel: ClaudeResult(
+        status="error", exit_code=1, session_id=None, result_text="roto", summary="roto",
+        stdout_truncated=False, duration_s=0.1)
+    queue(conn, "falla", "w2")
+    run_once(services, "w2")
+    assert "task_failed" in [e["kind"] for e in repo.pending_brain_events(conn, pid)]
+
+
+def test_telegram_approval_flow(env, monkeypatch):
+    from coclody.brain import service as brain_service
+    from coclody.brain.schema import Decision
+    from coclody.telegram_bot import app as app_module
+    from telegram import Update
+    from tests.fake_telegram import TOKEN, FakeTelegram, bot_message_with_buttons, callback_update, inline_data, user_text
+
+    build, root, conn = env
+    services, _ = build("brain_dry_run = false\nbrain_approval = true\n")
+    pid = prepo.active_project(conn).id
+
+    # Cerebro falso en modo aprobación: devuelve una decisión pendiente.
+    def fake_run_once(*a, **k):
+        with services.db() as c:
+            run = repo.start_brain_run(c, pid, "t", "prompt", "{}", dry_run=False)
+            d = Decision("enqueue", {"worker": "w1", "title": "revisá esto", "description": "d", "based_on": "r"}, "x")
+            row = repo.add_brain_decision(c, run.id, 0, d.action, d.payload(), status="dry_run")
+            repo.add_brain_approval(c, row.id)
+        return brain_service.BrainOutcome(run.id, "ok", [d], None, "plan", mode="approval", pending=[(row.id, d)])
+
+    monkeypatch.setattr(brain_service, "run_once", fake_run_once)
+
+    fake = FakeTelegram()
+    app = app_module.build_application(TOKEN, services, request=fake, get_updates_request=FakeTelegram())
+
+    async def go():
+        await app.initialize()
+        await app.process_update(Update.de_json(user_text(ME, "/cerebro"), app.bot))
+        # Entre los mensajes enviados, el de la decisión trae los botones ba:a / ba:r.
+        idx, approval_msg = next((i, m) for i, m in enumerate(fake.sent()) if inline_data(m)
+                                 and inline_data(m)[0].startswith("ba:"))
+        data = inline_data(approval_msg)
+        assert len(data) == 2 and data[0].startswith("ba:a:")
+        msg = bot_message_with_buttons(fake.returned_ids[idx], ME, approval_msg)
+        before = len(fake.sent())
+        await app.process_update(Update.de_json(callback_update(ME, data[0], message=msg), app.bot))
+        await app.shutdown()
+        return [m["text"] for m in fake.sent()[before:]]
+
+    replies = asyncio.run(go())
+    assert any("Aprobada" in t for t in replies)
+    assert len([t for t in repo.list_tasks(conn) if t.title == "revisá esto"]) == 1  # recién ahora se creó
+
+
+def test_telegram_reply_to_brain_question(env):
+    from coclody.db import repo
+    from coclody.telegram_bot import app as app_module
+    from telegram import Update
+    from tests.fake_telegram import TOKEN, FakeTelegram, bot_message, user_text
+
+    build, root, conn = env
+    services, _ = build("brain_dry_run = false\nbrain_approval = true\n")
+    pid = prepo.active_project(conn).id
+    q = repo.add_brain_question(conn, pid, "¿qué método de auth?", kind="open")
+    repo.record_brain_question_delivery(conn, q.id, ME, "sent", 7777)
+
+    fake = FakeTelegram()
+    app = app_module.build_application(TOKEN, services, request=fake, get_updates_request=FakeTelegram())
+
+    async def go():
+        await app.initialize()
+        reply_to = bot_message(7777, ME, "🧠❓ El cerebro necesita un dato")
+        await app.process_update(Update.de_json(user_text(ME, "JWT", reply_to=reply_to), app.bot))
+        await app.shutdown()
+        return [m["text"] for m in fake.sent()]
+
+    (reply,) = asyncio.run(go())
+    assert "le pasé tu respuesta al cerebro" in reply.lower()
+    q2 = repo.get_brain_question(conn, q.id)
+    assert q2.status == "answered" and q2.answer == "JWT"
+    assert "user_answer" in [e["kind"] for e in repo.pending_brain_events(conn, pid)]
+
+
+def test_brain_loop_fires_on_events(env, monkeypatch):
+    from coclody.brain import service as brain_service
+    from coclody.db import repo
+    from coclody.telegram_bot import app as app_module
+    from tests.fake_telegram import TOKEN, FakeTelegram
+
+    build, root, conn = env
+    services, _ = build("brain_dry_run = true\n")  # simulacro: el loop solo avisa el plan
+    pid = prepo.active_project(conn).id
+    for name in ("BRAIN_POLL_S", "BRAIN_DEBOUNCE_S"):
+        monkeypatch.setattr(app_module, name, 0.02)
+
+    ran = []
+
+    def fake_run_once(db, config, git, bd, hd, ec, trigger, event_ids=None):
+        with services.db() as c:
+            run = repo.start_brain_run(c, pid, trigger, "p", "{}", dry_run=True)
+            if event_ids:
+                repo.consume_brain_events(c, event_ids, run.id)
+        ran.append(trigger)
+        return brain_service.BrainOutcome(run.id, "ok", [], None, "🧠 plan", mode="dry_run")
+
+    monkeypatch.setattr(brain_service, "run_once", fake_run_once)
+
+    fake = FakeTelegram()
+    app = app_module.build_application(TOKEN, services, request=fake, get_updates_request=FakeTelegram())
+
+    async def go():
+        await app.initialize()
+        await app_module._post_init(app)
+        with services.db() as c:
+            repo.add_brain_event(c, pid, "worker_idle", None)
+        for _ in range(200):
+            if ran:
+                break
+            await asyncio.sleep(0.02)
+        await app_module._stop_services(app)
+        await app.shutdown()
+
+    asyncio.run(go())
+    assert ran and ran[0].startswith("eventos:")
+    assert repo.pending_brain_events(conn, pid) == []  # el evento se consumió

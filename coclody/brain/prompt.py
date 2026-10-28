@@ -77,7 +77,8 @@ def build_prompt(inputs: BrainInputs, budget: int) -> BuiltPrompt:
     if inputs.events:
         fixed.append("Qué pasó recién (por esto te invoco):\n" + "\n".join(f"- {e}" for e in inputs.events))
     if inputs.questions:
-        fixed.append("Preguntas de workers pendientes:\n" + "\n".join(f"- {q}" for q in inputs.questions))
+        fixed.append("Preguntas de workers pendientes (el #N es el question_id para answer_worker_question):\n"
+                     + "\n".join(f"- {q}" for q in inputs.questions))
 
     base = "\n\n".join(fixed)
     remaining = max(0, budget - len(base) - 200)  # margen para los envoltorios y la cola

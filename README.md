@@ -243,7 +243,7 @@ Estos son supuestos explícitos del diseño. Si alguno no se cumple en tu caso, 
 
 ## Orquestador (modo v2)
 
-> En construcción, por etapas. Hoy (etapa 4) están los proyectos, los worktrees, los workers en paralelo con sus commits, las reglas y el contexto por proyecto, y el **cerebro en modo simulacro** (decide y registra, no ejecuta); la ejecución real, los resúmenes y la web llegan en las etapas siguientes. Con `[orquestador] enabled = false` (el default), CoClody funciona exactamente como antes.
+> En construcción, por etapas. Hoy (etapa 5) el cerebro **ya ejecuta** (con freno de mano por defecto): proyectos, worktrees, workers en paralelo, reglas y contexto, y el cerebro decidiendo por eventos. Faltan los resúmenes periódicos y la web. Con `[orquestador] enabled = false` (el default), CoClody funciona exactamente como antes.
 
 Un **cerebro** (otra instancia de Claude Code que solo decide) coordina varios **workers** de Claude Code que trabajan en paralelo, cada uno en su propio worktree de git del **proyecto activo**.
 
@@ -295,6 +295,18 @@ Cada proyecto tiene sus **reglas** (cómo querés que se resuelvan las cosas) y 
 - **Sin herramientas.** El cerebro corre con `--tools ""` (no puede leer, escribir ni ejecutar nada; verificado con Claude real) y en una carpeta vacía fuera de los repos, para no cargar un `CLAUDE.md` del proyecto.
 - **Los resúmenes son datos, no órdenes.** Entran al prompt dentro de un bloque delimitado con un marcador aleatorio por invocación (que se borra si aparece en el propio contenido), y las instrucciones fijas le ordenan tratarlos como información. Además, su salida se valida contra un **esquema cerrado, todo o nada**: si algo no cierra (JSON inválido, una clave de más, una acción que no existe, un worker inexistente), se descarta la respuesta entera y queda registrada como inválida. El esquema no puede expresar nada peligroso: no hay forma de pedir un comando, una ruta o un cambio de configuración.
 - **Auditoría reconstruible.** Cada corrida guarda el prompt exacto que vio el modelo (con las reglas, el contexto y los resúmenes inline), su SHA-256, los ids de lo que entró, la salida cruda y cada decisión con su JSON (`brain_runs` y `brain_decisions`).
+
+### Cómo decide y ejecuta el cerebro
+
+El cerebro se invoca por **eventos** (un worker quedó libre, una tarea falló, un worker preguntó, respondiste algo, o lo llamaste con `/cerebro`), con un rato de espera para juntar eventos antes de correr. Tiene topes de invocaciones (por hora y por día): al llegar al tope, pausa y te avisa, no muere en silencio. Si devuelve algo inválido varias veces seguidas, espera cada vez más y al final se detiene y te avisa.
+
+Hay tres modos, por config:
+
+- **Simulacro** (`brain_dry_run = true`, el default): decide y te muestra qué haría, **no ejecuta nada**.
+- **Freno de mano** (`brain_dry_run = false`, `brain_approval = true`): la primera vez que ejecuta de verdad. Cada decisión te llega por Telegram con botones **✓ Aprobar / ✗ Rechazar**, y se ejecuta recién cuando la aprobás. Nada se ejecuta sin tu visto bueno.
+- **Autónomo** (`brain_approval = false`): cada decisión se ejecuta en el momento. Activalo recién cuando confíes.
+
+Lo que una decisión puede hacer al ejecutarse: encolar una tarea para un worker (respetando los topes de cola y de tareas autónomas por día), responderle una pregunta a un worker, proponerte un borrador de contexto (que seguís aprobando vos), o preguntarte algo (te llega como pregunta del cerebro, respondés con reply). Nunca más que eso: el esquema cerrado no puede expresar un comando, una ruta ni un cambio de configuración. Cada corrida y cada decisión quedan en la auditoría.
 
 ### Qué está garantizado y cómo
 

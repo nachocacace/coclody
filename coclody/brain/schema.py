@@ -96,7 +96,18 @@ def parse_response(text: str | None, *, workers: frozenset[str], open_question_i
     if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_DECISIONS:
         raise SchemaError(f"decisions tiene que ser una lista de 1 a {MAX_DECISIONS} elementos")
 
-    specs = {
+    specs = _specs(workers, open_question_ids)
+    return [_parse_item(item, i, specs) for i, item in enumerate(raw)]
+
+
+def decision_from_payload(payload: dict, *, workers: frozenset[str], open_question_ids: frozenset[int]) -> Decision:
+    """Reconstruye (y re-valida contra el estado actual) una decisión guardada, para ejecutarla al aprobarla."""
+    specs = _specs(workers, open_question_ids)
+    return _parse_item(payload, 0, specs)
+
+
+def _specs(workers: frozenset[str], open_question_ids: frozenset[int]) -> dict:
+    return {
         "enqueue": {"worker": _worker(workers), "title": _text(_MAX_TITLE), "description": _text(_MAX_TEXT),
                     "based_on": _text(_MAX_TEXT)},
         "ask": {"question": _text(_MAX_TEXT), "kind": _kind},
@@ -104,25 +115,25 @@ def parse_response(text: str | None, *, workers: frozenset[str], open_question_i
         "propose_context": {"text": _text(_MAX_TEXT)},
         "wait": {},
     }
-    out = []
-    for i, item in enumerate(raw):
-        if not isinstance(item, dict):
-            raise SchemaError(f"la decisión #{i} no es un objeto")
-        action = item.get("action")
-        if action not in specs:
-            raise SchemaError(f"la decisión #{i} tiene una acción inválida: {action!r}")
-        allowed = set(specs[action]) | {"action", "reason"}
-        extra = set(item) - allowed
-        if extra:
-            raise SchemaError(f"la decisión #{i} ({action}) tiene claves de más: {', '.join(sorted(extra))}")
-        fields = {}
-        for key, check in specs[action].items():
-            if key not in item:
-                raise SchemaError(f"la decisión #{i} ({action}) no tiene '{key}'")
-            fields[key] = check(item[key], f"decisión #{i}.{key}")
-        reason = _text(_MAX_REASON)(item.get("reason", ""), f"decisión #{i}.reason")
-        out.append(Decision(action, fields, reason))
-    return out
+
+
+def _parse_item(item, i: int, specs: dict) -> Decision:
+    if not isinstance(item, dict):
+        raise SchemaError(f"la decisión #{i} no es un objeto")
+    action = item.get("action")
+    if action not in specs:
+        raise SchemaError(f"la decisión #{i} tiene una acción inválida: {action!r}")
+    allowed = set(specs[action]) | {"action", "reason"}
+    extra = set(item) - allowed
+    if extra:
+        raise SchemaError(f"la decisión #{i} ({action}) tiene claves de más: {', '.join(sorted(extra))}")
+    fields = {}
+    for key, check in specs[action].items():
+        if key not in item:
+            raise SchemaError(f"la decisión #{i} ({action}) no tiene '{key}'")
+        fields[key] = check(item[key], f"decisión #{i}.{key}")
+    reason = _text(_MAX_REASON)(item.get("reason", ""), f"decisión #{i}.reason")
+    return Decision(action, fields, reason)
 
 
 def _no_dup_keys(pairs):

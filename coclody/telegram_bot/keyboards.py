@@ -13,6 +13,7 @@
       t:r:<tarea>          reintentar la tarea
       w:<tarea>:<worker>   asignar una tarea pendiente a un worker (orquestador)
       cx:a|r:<id>          aprobar o rechazar un borrador de contexto
+      ba:a|r:<decisión>    aprobar o rechazar una decisión del cerebro (freno de mano)
       q:<pregunta>:s|n     responder sí o no a una pregunta de sí/no
 
   El ``callback_data`` lo arma el bot, pero vuelve desde Telegram: se trata
@@ -61,6 +62,7 @@ _TASK_RE = re.compile(r"t:([cr]):([1-9][0-9]{0,15})")
 _ANSWER_RE = re.compile(r"q:([1-9][0-9]{0,15}):([sn])")
 _ASSIGN_RE = re.compile(r"w:([1-9][0-9]{0,15}):([a-z0-9][a-z0-9-]{0,15})")
 _CONTEXT_RE = re.compile(r"cx:([ar]):([1-9][0-9]{0,15})")
+_APPROVAL_RE = re.compile(r"ba:([ar]):([1-9][0-9]{0,15})")
 _ACTION_LABELS = {"cancel": "✖ Cancelar", "retry": "↻ Reintentar"}
 _ACTION_CODES = {"cancel": "c", "retry": "r"}
 
@@ -89,7 +91,13 @@ class ContextAction:
     approve: bool
 
 
-def parse_callback(data: object) -> TaskAction | AnswerAction | AssignAction | ContextAction | None:
+@dataclass(frozen=True)
+class ApprovalAction:
+    decision_id: int
+    approve: bool
+
+
+def parse_callback(data: object):
     if not isinstance(data, str):
         return None
     if match := _TASK_RE.fullmatch(data):
@@ -100,6 +108,8 @@ def parse_callback(data: object) -> TaskAction | AnswerAction | AssignAction | C
         return AssignAction(int(match.group(1)), match.group(2))
     if match := _CONTEXT_RE.fullmatch(data):
         return ContextAction(int(match.group(2)), match.group(1) == "a")
+    if match := _APPROVAL_RE.fullmatch(data):
+        return ApprovalAction(int(match.group(2)), match.group(1) == "a")
     return None
 
 
@@ -135,4 +145,12 @@ def context_buttons(context_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("✓ Aprobar", callback_data=f"cx:a:{context_id}"),
         InlineKeyboardButton("✗ Rechazar", callback_data=f"cx:r:{context_id}"),
+    ]])
+
+
+def approval_buttons(decision_id: int) -> InlineKeyboardMarkup:
+    """Aprobar / Rechazar una decisión del cerebro antes de que se ejecute (freno de mano)."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✓ Aprobar", callback_data=f"ba:a:{decision_id}"),
+        InlineKeyboardButton("✗ Rechazar", callback_data=f"ba:r:{decision_id}"),
     ]])

@@ -262,3 +262,138 @@ def test_no_active_project_returns_none(setup, monkeypatch):
 def test_many_decisions_allowed_up_to_max():
     data = resp(*[{"action": "wait", "reason": f"n{i}"} for i in range(MAX_DECISIONS)])
     assert len(parse_response(data, workers=WORKERS, open_question_ids=frozenset())) == MAX_DECISIONS
+
+
+# --- etapa 5: ejecución, freno de mano, topes -----------------------------------------------------------
+
+
+def run_mode(setup, text, monkeypatch, *, dry_run=True, approval=True):
+    db, config, conn, pid, app_paths = setup
+    import dataclasses
+    config = dataclasses.replace(config, orchestrator=dataclasses.replace(
+        config.orchestrator, brain_dry_run=dry_run, brain_approval=approval))
+    monkeypatch.setattr(brain_service, "run_brain", fake_brain(text))
+    outcome = brain_service.run_once(db, config, git=None, brain_dir=app_paths.brain_dir,
+                                     hooks_dir=app_paths.git_hooks_dir, empty_config=app_paths.git_empty_config,
+                                     trigger="prueba")
+    return outcome, config
+
+
+def test_autonomous_executes_enqueue(setup, monkeypatch):
+    db, config, conn, pid, _ = setup
+    text = resp({"action": "enqueue", "worker": "w1", "title": "Hacer X", "description": "detalle",
+                 "based_on": "r", "reason": "hay que hacerlo"})
+    outcome, _ = run_mode(setup, text, monkeypatch, dry_run=False, approval=False)
+    assert outcome.mode == "autonomous"
+    tasks = repo.list_tasks(conn)
+    assert len(tasks) == 1 and tasks[0].title == "Hacer X"
+    assert tasks[0].worker == "w1" and tasks[0].status == "queued" and tasks[0].origin == "brain"
+    (d,) = repo.list_brain_decisions(conn, outcome.run_id)
+    assert d.status == "executed" and d.result_ref == f"task:{tasks[0].id}"
+    assert tasks[0].brain_decision_id == d.id  # la tarea apunta a la decisión que la creó
+
+
+def test_autonomous_answers_worker_question_and_requeues(setup, monkeypatch):
+    db, config, conn, pid, _ = setup
+    t = repo.create_task(conn, "login", project_id=pid)
+    repo.assign_task(conn, t.id, pid, "w1")
+    repo.transition_task(conn, t.id, "running")
+    repo.ask_question(conn, t.id, "¿JWT o sesiones?")
+    (q,) = repo.list_open_questions(conn, task_id=t.id)
+    repo.transition_task(conn, t.id, "waiting_input")
+    knowledge.add_rule(conn, pid, "Usá siempre JWT")
+
+    text = resp({"action": "answer_worker_question", "question_id": q.id, "answer": "JWT", "reason": "por la regla"})
+    outcome, _ = run_mode(setup, text, monkeypatch, dry_run=False, approval=False)
+    q2 = repo.get_question(conn, q.id)
+    assert q2.status == "answered" and q2.answer == "JWT" and q2.answered_by == 0
+    assert repo.get_task(conn, t.id).status == "queued"  # se reencoló
+
+
+def test_autonomous_respects_queue_cap(setup, monkeypatch):
+    db, config, conn, pid, _ = setup
+    import dataclasses
+    for i in range(3):  # llena la cola de w1 (tope default 3)
+        t = repo.create_task(conn, f"t{i}", project_id=pid)
+        repo.assign_task(conn, t.id, pid, "w1")
+    text = resp({"action": "enqueue", "worker": "w1", "title": "una más", "description": "d",
+                 "based_on": "r", "reason": "x"})
+    monkeypatch.setattr(brain_service, "run_brain", fake_brain(text))
+    config = dataclasses.replace(config, orchestrator=dataclasses.replace(
+        config.orchestrator, brain_dry_run=False, brain_approval=False, max_queue_per_worker=3))
+    outcome = brain_service.run_once(db, config, git=None, brain_dir=setup[4].brain_dir,
+                                     hooks_dir=setup[4].git_hooks_dir, empty_config=setup[4].git_empty_config,
+                                     trigger="x")
+    (d,) = repo.list_brain_decisions(conn, outcome.run_id)
+    assert d.status == "rejected"  # no la ejecutó por el tope
+    assert len([t for t in repo.list_tasks(conn) if t.title == "una más"]) == 0
+
+
+def test_approval_records_pending_and_executes_on_approve(setup, monkeypatch):
+    db, config, conn, pid, _ = setup
+    text = resp({"action": "enqueue", "worker": "w2", "title": "revisar", "description": "d",
+                 "based_on": "r", "reason": "x"})
+    outcome, config = run_mode(setup, text, monkeypatch, dry_run=False, approval=True)
+    assert outcome.mode == "approval" and len(outcome.pending) == 1
+    (decision_id, decision) = outcome.pending[0]
+    # Nada ejecutado todavía.
+    assert [t for t in repo.list_tasks(conn) if t.title == "revisar"] == []
+    assert repo.get_approval(conn, decision_id).status == "pending"
+    assert repo.get_brain_decision(conn, decision_id).status == "dry_run"
+
+    # Aprobar → ejecuta.
+    msg, bq = brain_service.approve_decision(db, config, decision_id, approved=True, decided_by=1)
+    assert "Aprobada" in msg and bq is None
+    assert repo.get_approval(conn, decision_id).status == "approved"
+    assert repo.get_brain_decision(conn, decision_id).status == "executed"
+    assert len([t for t in repo.list_tasks(conn) if t.title == "revisar"]) == 1
+
+
+def test_approval_reject_does_not_execute(setup, monkeypatch):
+    db, config, conn, pid, _ = setup
+    text = resp({"action": "propose_context", "text": "dato", "reason": "x"})
+    outcome, config = run_mode(setup, text, monkeypatch, dry_run=False, approval=True)
+    (decision_id, _) = outcome.pending[0]
+    msg, _ = brain_service.approve_decision(db, config, decision_id, approved=False, decided_by=1)
+    assert "Rechazada" in msg
+    assert repo.get_brain_decision(conn, decision_id).status == "rejected"
+    assert knowledge.list_context(conn, pid) == []  # no se creó el borrador
+    # Aprobar algo ya resuelto no hace nada.
+    msg2, _ = brain_service.approve_decision(db, config, decision_id, approved=True, decided_by=1)
+    assert "No pude" in msg2
+
+
+def test_approval_ask_creates_brain_question_on_approve(setup, monkeypatch):
+    db, config, conn, pid, _ = setup
+    text = resp({"action": "ask", "question": "¿qué framework de tests?", "kind": "open", "reason": "no está en reglas"})
+    outcome, config = run_mode(setup, text, monkeypatch, dry_run=False, approval=True)
+    (decision_id, _) = outcome.pending[0]
+    msg, bq_id = brain_service.approve_decision(db, config, decision_id, approved=True, decided_by=1)
+    assert bq_id is not None
+    q = repo.get_brain_question(conn, bq_id)
+    assert q.status == "open" and "framework" in q.question
+
+
+def test_dry_run_still_executes_nothing_in_stage5(setup, monkeypatch):
+    db, config, conn, pid, _ = setup
+    text = resp({"action": "enqueue", "worker": "w1", "title": "no debería crearse", "description": "d",
+                 "based_on": "r", "reason": "x"})
+    outcome, _ = run_mode(setup, text, monkeypatch, dry_run=True, approval=True)
+    assert outcome.mode == "dry_run"
+    assert [t for t in repo.list_tasks(conn) if t.title == "no debería crearse"] == []
+    assert repo.list_brain_decisions(conn, outcome.run_id)[0].status == "dry_run"
+
+
+def test_autonomous_daily_cap(setup, monkeypatch):
+    import dataclasses
+    db, config, conn, pid, _ = setup
+    config = dataclasses.replace(config, orchestrator=dataclasses.replace(
+        config.orchestrator, brain_dry_run=False, brain_approval=False, autonomous_tasks_per_day=1))
+    monkeypatch.setattr(brain_service, "run_brain",
+                        fake_brain(resp({"action": "enqueue", "worker": "w1", "title": "a", "description": "d",
+                                         "based_on": "r", "reason": "x"})))
+    paths = setup[4]
+    first = brain_service.run_once(db, config, None, paths.brain_dir, paths.git_hooks_dir, paths.git_empty_config, "x")
+    assert repo.list_brain_decisions(conn, first.run_id)[0].status == "executed"
+    second = brain_service.run_once(db, config, None, paths.brain_dir, paths.git_hooks_dir, paths.git_empty_config, "y")
+    assert repo.list_brain_decisions(conn, second.run_id)[0].status == "rejected"  # llegó al tope del día

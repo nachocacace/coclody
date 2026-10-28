@@ -81,6 +81,7 @@ from coclody.telegram_bot.keyboards import (
     BUTTON_NEW,
     MAIN_KEYBOARD,
     NEW_TASK_PROMPT,
+    ApprovalAction,
     AssignAction,
     ContextAction,
     TaskAction,
@@ -103,6 +104,11 @@ POLL_WATCH_S = 5.0
 USAGE_COOLDOWN_S = 900.0  # cuánto esperar antes de reintentar tras toparse con el límite de uso
 USAGE_PAUSED_MSG = ("⏸️ Pausé los workers: Claude Code reportó el límite de uso de la suscripción. "
                     "Reintento en unos %d minutos. No hace falta que hagas nada.")
+BRAIN_POLL_S = 5.0          # cada cuánto el bucle del cerebro mira si hay eventos
+BRAIN_DEBOUNCE_S = 20.0     # espera a juntar eventos antes de invocar al cerebro
+BRAIN_BACKOFF_S = (60.0, 120.0, 240.0)  # espera creciente tras respuestas inválidas seguidas
+BRAIN_BUDGET_MSG = ("⏸️ Pausé al cerebro: llegó al tope de %s invocaciones. Se reanuda cuando pase la ventana. "
+                    "Podés subir el tope en la config.")
 POLLING_DEAD = (
     "El polling de Telegram se detuvo por un error (%s). CoClody sigue abierto pero NO recibe mensajes "
     "ni botones; no va a empezar tareas nuevas ni enviar avisos. La tarea en curso, si hay, termina sola. "
@@ -130,6 +136,7 @@ class Services:
     # Momento (monotonic) en que la cola se pausó por el límite de uso de la suscripción, o None.
     usage_paused_at: float | None = None
     usage_notified: bool = False
+    brain_budget_notified: bool = False
     keepawake: KeepAwake = field(default_factory=KeepAwake)
     # Telegram fecha los mensajes con resolución de segundos.
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC).replace(microsecond=0))
@@ -214,10 +221,19 @@ def build_application(
         (("proyecto",), lambda u: switch_project(services, _args(u))),
         (("worker",), only_orch(lambda u: c.workers(_args(u)))),
         (("reglas",), only_orch(lambda u: c.rules(_args(u)))),
-        (("cerebro",), only_orch(lambda u: run_brain_dry(services, "pedido con /cerebro"))),
     ):
         app.add_handler(CommandHandler(list(names), _reply_with(fn), filters=only_new))
     app.add_handler(CommandHandler("contexto", context_cmd, filters=only_new))
+
+    async def cerebro_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not services.config.orchestrator.enabled:
+            await update.effective_message.reply_text(ORCHESTRATOR_OFF, reply_markup=MAIN_KEYBOARD)
+            raise ApplicationHandlerStop
+        plan = await trigger_brain(app, services, "pedido con /cerebro", to=update.effective_chat.id)
+        await update.effective_message.reply_text(outgoing(plan), reply_markup=MAIN_KEYBOARD)
+        raise ApplicationHandlerStop
+
+    app.add_handler(CommandHandler("cerebro", cerebro_cmd, filters=only_new))
 
     def on_text(update: Update) -> str | Reply:
         message, chat_id = update.effective_message, update.effective_chat.id
@@ -240,6 +256,8 @@ def build_application(
             return c.unmatched_text(chat_id)
         if c.take_task_prompt(chat_id, target):
             return new(chat_id, message.text)
+        if services.config.orchestrator.enabled and answer_brain_question_reply(services, chat_id, target, message.text):
+            return "Le pasé tu respuesta al cerebro."
         text = c.answer_reply(chat_id, target, message.text)
         if text is not None:
             return text
@@ -367,6 +385,15 @@ async def _on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         remove_buttons = text.startswith("La tarea")  # asignada: los otros botones ya no sirven
     elif isinstance(action, ContextAction):
         text, remove_buttons = await asyncio.to_thread(c.decide_context, action.context_id, action.approve, chat_id)
+    elif isinstance(action, ApprovalAction):
+        services: Services = context.bot_data["services"]
+        from coclody.brain import service as brain_service
+
+        text, bq_id = await asyncio.to_thread(
+            brain_service.approve_decision, services.db, services.config, action.decision_id, action.approve, chat_id)
+        remove_buttons = True
+        if bq_id:  # la decisión aprobada era un "ask": mando la pregunta del cerebro
+            await deliver_brain_question(context.application, services, bq_id)
     else:
         text, remove_buttons = await asyncio.to_thread(
             c.answer_button, chat_id, query.message.message_id, action.question_id, action.answer
@@ -473,19 +500,89 @@ def switch_project(services: Services, arg: str) -> str:
 ORCHESTRATOR_OFF = "El modo orquestador no está activado ([orquestador] enabled = false en la configuración)."
 
 
-def run_brain_dry(services: Services, trigger: str) -> str:
-    """Corre el cerebro en simulacro y devuelve el plan (no ejecuta nada). Para /cerebro y el scheduler futuro."""
+async def trigger_brain(app: Application, services: Services, trigger: str, *, to: int | None = None,
+                        event_ids: list[int] | None = None) -> str:
+    """Corre el cerebro una vez y entrega sus mensajes (aprobaciones y preguntas). Devuelve el plan.
+
+    En simulacro no toca nada. Con aprobación, manda cada decisión con botones ✓/✗. En autónomo, ya
+    ejecutó y manda las preguntas que hayan surgido. ``to`` (chat de /cerebro) o, si es None, la lista blanca.
+    """
     from coclody.brain import service as brain_service
 
     if services.git is None or services.app_paths is None:
         return "El orquestador no está listo (falta git o las carpetas)."
-    outcome = brain_service.run_once(
-        services.db, services.config, services.git, services.app_paths.brain_dir,
-        services.app_paths.git_hooks_dir, services.app_paths.git_empty_config, trigger,
+    paths = services.app_paths
+    outcome = await asyncio.to_thread(
+        brain_service.run_once, services.db, services.config, services.git, paths.brain_dir,
+        paths.git_hooks_dir, paths.git_empty_config, trigger, event_ids,
     )
     if outcome is None:
         return "No hay proyecto activo. Elegí uno con /proyecto <nombre>."
+
+    for decision_id, decision in outcome.pending:  # freno de mano: cada decisión a aprobar
+        text = f"🧠 El cerebro propone (decisión #{decision_id}):\n{brain_service.describe(decision)}\n\nporque: {decision.reason}"
+        await _deliver_approval(app, services, decision_id, text)
+    for bq_id in outcome.brain_question_ids:       # preguntas que el cerebro generó (autónomo)
+        await deliver_brain_question(app, services, bq_id)
     return outcome.plan
+
+
+async def _deliver_approval(app: Application, services: Services, decision_id: int, text: str) -> None:
+    from coclody.db import repo
+    from coclody.telegram_bot.keyboards import approval_buttons
+
+    for chat_id in sorted(services.config.telegram.allowed_chat_ids):
+        try:
+            sent = await app.bot.send_message(chat_id=chat_id, text=outgoing(text), reply_markup=approval_buttons(decision_id))
+            await asyncio.to_thread(_record_approval_delivery, services, decision_id, chat_id, sent.message_id)
+        except Exception as exc:
+            log.warning("No se pudo enviar la decisión #%s al chat %s: %s", decision_id, chat_id, exc)
+
+
+def _record_approval_delivery(services: Services, decision_id: int, chat_id: int, message_id: int) -> None:
+    from coclody.db import repo
+
+    with services.db() as conn:
+        repo.set_approval_delivery(conn, decision_id, chat_id, message_id)
+
+
+async def deliver_brain_question(app: Application, services: Services, question_id: int) -> None:
+    """Manda una pregunta del cerebro a la lista blanca y registra el envío (para responderla con reply)."""
+    from coclody.db import repo
+
+    with services.db() as conn:
+        q = repo.get_brain_question(conn, question_id)
+    if q is None:
+        return
+    text = (f"🧠❓ El cerebro necesita un dato:\n\n{q.question}\n\n"
+            "Respondé a este mensaje (mantené apretado → Responder).")
+    for chat_id in sorted(services.config.telegram.allowed_chat_ids):
+        try:
+            sent = await app.bot.send_message(chat_id=chat_id, text=outgoing(text), reply_markup=MAIN_KEYBOARD)
+            await asyncio.to_thread(_record_bq_delivery, services, question_id, chat_id, sent.message_id)
+        except Exception as exc:
+            log.warning("No se pudo enviar la pregunta del cerebro #%s al chat %s: %s", question_id, chat_id, exc)
+
+
+def _record_bq_delivery(services: Services, question_id: int, chat_id: int, message_id: int) -> None:
+    from coclody.db import repo
+
+    with services.db() as conn:
+        repo.record_brain_question_delivery(conn, question_id, chat_id, "sent", message_id)
+
+
+def answer_brain_question_reply(services: Services, chat_id: int, message_id: int, text: str) -> bool:
+    """Si ``message_id`` es el mensaje de una pregunta del cerebro, la responde y despierta al cerebro."""
+    from coclody.db import projects as prepo
+    from coclody.db import repo
+
+    with services.db() as conn:
+        q = repo.brain_question_by_message(conn, chat_id, message_id)
+        if q is None or q.status != "open":
+            return False
+        repo.answer_brain_question(conn, q.id, text, answered_by=chat_id)
+        repo.add_brain_event(conn, q.project_id, "user_answer", q.id)
+    return True
 
 
 async def setup_menu(bot, allowed_chat_ids, orchestrator: bool = False) -> int:
@@ -526,6 +623,8 @@ async def _post_init(app: Application) -> None:
         asyncio.create_task(_notifier_loop(app, services), name="coclody-notifier"),
         asyncio.create_task(_polling_watch_loop(app, services), name="coclody-polling-watch"),
     ]
+    if services.config.orchestrator.enabled:
+        services.background.append(asyncio.create_task(_brain_loop(app, services), name="coclody-brain"))
     if services.updater is not None:
         services.background.append(asyncio.create_task(_update_loop(app, services), name="coclody-updater"))
 
@@ -643,7 +742,99 @@ def run_worker_once(services: Services, name: str):
         services.app_paths.git_empty_config, runner=services.worker.runner,
     )
     task = worker.run_next()
+    if task is not None and not worker.usage_limited:
+        _emit_worker_events(services, project.id, name, task)
     return task, worker.usage_limited
+
+
+def _emit_worker_events(services: Services, project_id: int, name: str, task) -> None:
+    """Despierta al cerebro cuando un worker falla, hace una pregunta o queda sin tareas."""
+    from coclody.db import repo
+
+    with services.db() as conn:
+        if task.status == "failed":
+            repo.add_brain_event(conn, project_id, "task_failed", task.id)
+        elif task.status == "waiting_input":
+            repo.add_brain_event(conn, project_id, "worker_question", task.id)
+        if task.status in ("done", "failed") and repo.count_queued_for(conn, project_id, name) == 0:
+            repo.add_brain_event(conn, project_id, "worker_idle", None)
+
+
+async def _brain_loop(app: Application, services: Services) -> None:
+    """Invoca al cerebro cuando hay eventos, con debounce, backoff ante respuestas inválidas y tope de uso."""
+    from coclody.db import projects as prepo
+    from coclody.db import repo
+
+    invalid_streak = 0
+    while not services.stop.is_set():
+        await _sleep_or_stop(services.stop, BRAIN_POLL_S)
+        if services.stop.is_set() or services.polling_error is not None:
+            continue
+        with services.db() as conn:
+            project = prepo.active_project(conn)
+            pending = repo.pending_brain_events(conn, project.id) if project else []
+        if not project or not pending:
+            continue
+        await _sleep_or_stop(services.stop, BRAIN_DEBOUNCE_S)  # junta eventos antes de invocar
+        if services.stop.is_set():
+            continue
+        with services.db() as conn:
+            pending = repo.pending_brain_events(conn, project.id)
+            over = _brain_budget_exceeded(conn, services, project.id)
+        if over:
+            if not services.brain_budget_notified:
+                services.brain_budget_notified = True
+                await _notify_all(app, services, BRAIN_BUDGET_MSG % over)
+            continue
+        services.brain_budget_notified = False
+        event_ids = [e["id"] for e in pending]
+        trigger = "eventos: " + ", ".join(sorted({e["kind"] for e in pending}))
+        outcome = await _run_brain_collecting(app, services, trigger, event_ids)
+        if outcome is not None and outcome.parse_status == "invalid":
+            invalid_streak += 1
+            await _notify_all(app, services, "⚠️ El cerebro devolvió algo inválido; lo descarté. "
+                              f"({invalid_streak} seguida/s)")
+            await _sleep_or_stop(services.stop, BRAIN_BACKOFF_S[min(invalid_streak - 1, len(BRAIN_BACKOFF_S) - 1)])
+            if invalid_streak >= len(BRAIN_BACKOFF_S):
+                await _notify_all(app, services, "⏸️ El cerebro falló varias veces seguidas; lo dejo en pausa. "
+                                  "Revisá las reglas y volvé a llamarlo con /cerebro.")
+                return
+        else:
+            invalid_streak = 0
+
+
+def _brain_budget_exceeded(conn, services: Services, project_id: int) -> str | None:
+    from coclody.db import repo
+
+    orch = services.config.orchestrator
+    if repo.count_brain_runs_since(conn, project_id, "-1 hour") >= orch.brain_calls_per_hour:
+        return f"{orch.brain_calls_per_hour}/hora"
+    if repo.count_brain_runs_since(conn, project_id, "-1 day") >= orch.brain_calls_per_day:
+        return f"{orch.brain_calls_per_day}/día"
+    return None
+
+
+async def _run_brain_collecting(app: Application, services: Services, trigger: str, event_ids: list[int]):
+    """Corre el cerebro por eventos y manda el plan a la lista blanca. Devuelve el BrainOutcome (o None)."""
+    from coclody.brain import service as brain_service
+
+    paths = services.app_paths
+    outcome = await asyncio.to_thread(
+        brain_service.run_once, services.db, services.config, services.git, paths.brain_dir,
+        paths.git_hooks_dir, paths.git_empty_config, trigger, event_ids)
+    if outcome is None:
+        return None
+    for decision_id, decision in outcome.pending:
+        text = (f"🧠 El cerebro propone (decisión #{decision_id}):\n{brain_service.describe(decision)}"
+                f"\n\nporque: {decision.reason}")
+        await _deliver_approval(app, services, decision_id, text)
+    for bq_id in outcome.brain_question_ids:
+        await deliver_brain_question(app, services, bq_id)
+    if outcome.parse_status == "ok" and services.config.orchestrator.brain_dry_run:
+        await _notify_all(app, services, outcome.plan)  # en simulacro, te muestro lo que haría
+    elif outcome.mode == "autonomous":
+        await _notify_all(app, services, outcome.plan)
+    return outcome
 
 
 async def _notifier_loop(app: Application, services: Services) -> None:

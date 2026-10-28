@@ -315,7 +315,7 @@ def set_question_message(conn: sqlite3.Connection, question_id: int, tg_chat_id:
 
 def answer_question(conn: sqlite3.Connection, question_id: int, answer: str, answered_by: int) -> Question:
     text = _text(answer, "answer", 4000)
-    by = _int(answered_by, "answered_by", 1, 2**53)
+    by = _int(answered_by, "answered_by", 0, 2**53)  # 0 = el cerebro (sin chat)
     with transaction(conn):
         q = _get(conn, Question, "questions", question_id)
         if q.status != "open":
@@ -521,6 +521,205 @@ def add_brain_decision(conn: sqlite3.Connection, run_id: int, idx: int, action: 
             (run_id, _int(idx, "idx", 0, 10000), action, payload, status, result_ref),
         )
         return _get(conn, BrainDecision, "brain_decisions", cur.lastrowid)
+
+
+@dataclass(frozen=True)
+class BrainApproval:
+    decision_id: int
+    status: str
+    chat_id: int | None
+    tg_message_id: int | None
+    decided_by: int | None
+    decided_at: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
+class BrainQuestion:
+    id: int
+    project_id: int
+    question: str
+    kind: str
+    status: str
+    answer: str | None
+    brain_decision_id: int | None
+    asked_at: str
+    answered_at: str | None
+    answered_by: int | None
+
+
+def count_queued_for(conn: sqlite3.Connection, project_id: int, worker: str) -> int:
+    return conn.execute(
+        "SELECT count(*) FROM tasks WHERE project_id = ? AND worker = ? AND status = 'queued'",
+        (project_id, worker),
+    ).fetchone()[0]
+
+
+def mark_task_from_brain(conn: sqlite3.Connection, task_id: int, brain_decision_id: int) -> None:
+    with transaction(conn):
+        conn.execute(
+            "UPDATE tasks SET origin = 'brain', brain_decision_id = ? WHERE id = ?", (brain_decision_id, task_id)
+        )
+
+
+def add_brain_question(conn: sqlite3.Connection, project_id: int, question: str, kind: str = "open",
+                       brain_decision_id: int | None = None) -> BrainQuestion:
+    text = _text(question, "pregunta del cerebro", 4000)
+    if kind not in ("open", "yes_no"):
+        raise ValidationError(f"tipo de pregunta inválido: {kind!r}")
+    with transaction(conn):
+        cur = conn.execute(
+            "INSERT INTO brain_questions (project_id, question, kind, brain_decision_id) VALUES (?, ?, ?, ?)",
+            (_int(project_id, "project_id", 1, 2**53), text, kind, brain_decision_id),
+        )
+        return _get(conn, BrainQuestion, "brain_questions", cur.lastrowid)
+
+
+def get_brain_question(conn: sqlite3.Connection, question_id: int) -> BrainQuestion | None:
+    return _find(conn, BrainQuestion, "brain_questions", question_id)
+
+
+def list_open_brain_questions(conn: sqlite3.Connection, project_id: int) -> list[BrainQuestion]:
+    rows = conn.execute(
+        "SELECT * FROM brain_questions WHERE project_id = ? AND status = 'open' ORDER BY id", (project_id,)
+    )
+    return [BrainQuestion(**dict(r)) for r in rows]
+
+
+def answer_brain_question(conn: sqlite3.Connection, question_id: int, answer: str, answered_by: int) -> BrainQuestion:
+    text = _text(answer, "respuesta", 4000)
+    with transaction(conn):
+        q = _get(conn, BrainQuestion, "brain_questions", question_id)
+        if q.status != "open":
+            raise InvalidTransitionError(f"la pregunta del cerebro #{q.id} no está abierta ('{q.status}')")
+        conn.execute(
+            "UPDATE brain_questions SET answer = ?, answered_by = ?, status = 'answered',"
+            " answered_at = datetime('now') WHERE id = ?",
+            (text, _int(answered_by, "answered_by", 1, 2**53), q.id),
+        )
+        return _get(conn, BrainQuestion, "brain_questions", q.id)
+
+
+def record_brain_question_delivery(conn: sqlite3.Connection, question_id: int, chat_id: int, status: str,
+                                   tg_message_id: int | None) -> None:
+    if status not in ("sent", "rejected"):
+        raise ValidationError(f"estado de envío inválido: {status!r}")
+    with transaction(conn):
+        conn.execute(
+            "INSERT OR REPLACE INTO brain_question_deliveries (question_id, chat_id, status, tg_message_id)"
+            " VALUES (?, ?, ?, ?)",
+            (question_id, _int(chat_id, "chat_id", 1, 2**53), status,
+             None if tg_message_id is None else _int(tg_message_id, "tg_message_id", 1, 2**53)),
+        )
+
+
+def brain_question_by_message(conn: sqlite3.Connection, chat_id: int, tg_message_id: int) -> BrainQuestion | None:
+    row = conn.execute(
+        "SELECT q.* FROM brain_question_deliveries d JOIN brain_questions q ON q.id = d.question_id"
+        " WHERE d.chat_id = ? AND d.tg_message_id = ?",
+        (chat_id, tg_message_id),
+    ).fetchone()
+    return BrainQuestion(**dict(row)) if row else None
+
+
+# --- eventos que despiertan al cerebro ----------------------------------------------------------
+
+_BRAIN_EVENT_KINDS = ("worker_idle", "worker_question", "task_failed", "user_answer", "user_request")
+
+
+def add_brain_event(conn: sqlite3.Connection, project_id: int, kind: str, ref_id: int | None = None) -> int:
+    if kind not in _BRAIN_EVENT_KINDS:
+        raise ValidationError(f"tipo de evento del cerebro inválido: {kind!r}")
+    with transaction(conn):
+        cur = conn.execute(
+            "INSERT INTO brain_events (project_id, kind, ref_id) VALUES (?, ?, ?)",
+            (_int(project_id, "project_id", 1, 2**53), kind, ref_id),
+        )
+        return cur.lastrowid
+
+
+def pending_brain_events(conn: sqlite3.Connection, project_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM brain_events WHERE project_id = ? AND consumed_by_run IS NULL ORDER BY id",
+        (project_id,),
+    ).fetchall()
+
+
+def consume_brain_events(conn: sqlite3.Connection, event_ids: list[int], run_id: int) -> None:
+    if not event_ids:
+        return
+    marks = ",".join("?" * len(event_ids))
+    with transaction(conn):
+        conn.execute(
+            f"UPDATE brain_events SET consumed_by_run = ? WHERE id IN ({marks})", (run_id, *event_ids)
+        )
+
+
+# --- aprobaciones (freno de mano) ---------------------------------------------------------------
+
+
+def add_brain_approval(conn: sqlite3.Connection, decision_id: int) -> BrainApproval:
+    with transaction(conn):
+        conn.execute("INSERT INTO brain_approvals (decision_id) VALUES (?)", (decision_id,))
+        return _get(conn, BrainApproval, "brain_approvals", decision_id, key="decision_id")
+
+
+def set_approval_delivery(conn: sqlite3.Connection, decision_id: int, chat_id: int, tg_message_id: int) -> None:
+    with transaction(conn):
+        conn.execute(
+            "UPDATE brain_approvals SET chat_id = ?, tg_message_id = ? WHERE decision_id = ?",
+            (chat_id, tg_message_id, decision_id),
+        )
+
+
+def resolve_approval(conn: sqlite3.Connection, decision_id: int, approved: bool, decided_by: int) -> BrainApproval:
+    """Marca una aprobación pendiente como aprobada/rechazada. Falla si ya no está pendiente."""
+    with transaction(conn):
+        row = conn.execute("SELECT * FROM brain_approvals WHERE decision_id = ?", (decision_id,)).fetchone()
+        if row is None:
+            raise NotFoundError(f"no existe la aprobación de la decisión #{decision_id}")
+        if row["status"] != "pending":
+            raise InvalidTransitionError(f"la decisión #{decision_id} ya fue {row['status']}")
+        conn.execute(
+            "UPDATE brain_approvals SET status = ?, decided_by = ?, decided_at = datetime('now') WHERE decision_id = ?",
+            ("approved" if approved else "rejected", _int(decided_by, "decided_by", 0, 2**53), decision_id),
+        )
+        return _get(conn, BrainApproval, "brain_approvals", decision_id, key="decision_id")
+
+
+def get_approval(conn: sqlite3.Connection, decision_id: int) -> BrainApproval | None:
+    row = conn.execute("SELECT * FROM brain_approvals WHERE decision_id = ?", (decision_id,)).fetchone()
+    return BrainApproval(**dict(row)) if row else None
+
+
+# --- contadores para los topes del cerebro ------------------------------------------------------
+
+
+def count_brain_tasks_today(conn: sqlite3.Connection, project_id: int) -> int:
+    return conn.execute(
+        "SELECT count(*) FROM tasks WHERE project_id = ? AND origin = 'brain' AND created_at >= datetime('now', '-1 day')",
+        (project_id,),
+    ).fetchone()[0]
+
+
+def count_brain_runs_since(conn: sqlite3.Connection, project_id: int, window: str) -> int:
+    return conn.execute(
+        "SELECT count(*) FROM brain_runs WHERE project_id = ? AND started_at >= datetime('now', ?)",
+        (project_id, window),
+    ).fetchone()[0]
+
+
+def set_brain_decision_result(conn: sqlite3.Connection, decision_id: int, status: str,
+                              result_ref: str | None) -> None:
+    if status not in ("executed", "rejected", "dry_run"):
+        raise ValidationError(f"status de decisión inválido: {status!r}")
+    with transaction(conn):
+        conn.execute("UPDATE brain_decisions SET status = ?, result_ref = ? WHERE id = ?",
+                     (status, result_ref, decision_id))
+
+
+def get_brain_decision(conn: sqlite3.Connection, decision_id: int) -> BrainDecision | None:
+    return _find(conn, BrainDecision, "brain_decisions", decision_id)
 
 
 def get_brain_run(conn: sqlite3.Connection, run_id: int) -> BrainRun | None:
@@ -774,8 +973,8 @@ def _find(conn: sqlite3.Connection, cls, table: str, row_id: int):
     return cls(**dict(row)) if row else None
 
 
-def _get(conn: sqlite3.Connection, cls, table: str, row_id: int):
-    found = _find(conn, cls, table, row_id)
-    if found is None:
-        raise NotFoundError(f"no existe {table} id={row_id}")
-    return found
+def _get(conn: sqlite3.Connection, cls, table: str, row_id: int, key: str = "id"):
+    row = conn.execute(f"SELECT * FROM {table} WHERE {key} = ?", (row_id,)).fetchone()
+    if row is None:
+        raise NotFoundError(f"no existe {table} {key}={row_id}")
+    return cls(**dict(row))
