@@ -67,6 +67,11 @@ class AppPaths:
         """GIT_CONFIG_GLOBAL de los workers: un archivo que no existe (sin helpers de credenciales)."""
         return self.data_dir / "git-config-vacio"
 
+    @property
+    def brain_dir(self) -> Path:
+        """Carpeta de trabajo del cerebro: vacía y fuera de cualquier repo (no lee un CLAUDE.md del proyecto)."""
+        return self.data_dir / "cerebro"
+
     @classmethod
     def under(cls, root: Path) -> AppPaths:
         """Todo bajo una misma raíz (tests, o instalaciones portables a futuro)."""

@@ -214,6 +214,7 @@ def build_application(
         (("proyecto",), lambda u: switch_project(services, _args(u))),
         (("worker",), only_orch(lambda u: c.workers(_args(u)))),
         (("reglas",), only_orch(lambda u: c.rules(_args(u)))),
+        (("cerebro",), only_orch(lambda u: run_brain_dry(services, "pedido con /cerebro"))),
     ):
         app.add_handler(CommandHandler(list(names), _reply_with(fn), filters=only_new))
     app.add_handler(CommandHandler("contexto", context_cmd, filters=only_new))
@@ -470,6 +471,21 @@ def switch_project(services: Services, arg: str) -> str:
 
 
 ORCHESTRATOR_OFF = "El modo orquestador no está activado ([orquestador] enabled = false en la configuración)."
+
+
+def run_brain_dry(services: Services, trigger: str) -> str:
+    """Corre el cerebro en simulacro y devuelve el plan (no ejecuta nada). Para /cerebro y el scheduler futuro."""
+    from coclody.brain import service as brain_service
+
+    if services.git is None or services.app_paths is None:
+        return "El orquestador no está listo (falta git o las carpetas)."
+    outcome = brain_service.run_once(
+        services.db, services.config, services.git, services.app_paths.brain_dir,
+        services.app_paths.git_hooks_dir, services.app_paths.git_empty_config, trigger,
+    )
+    if outcome is None:
+        return "No hay proyecto activo. Elegí uno con /proyecto <nombre>."
+    return outcome.plan
 
 
 async def setup_menu(bot, allowed_chat_ids, orchestrator: bool = False) -> int:

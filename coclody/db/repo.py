@@ -448,6 +448,98 @@ def count_runs(conn: sqlite3.Connection, task_id: int) -> int:
     return conn.execute("SELECT count(*) FROM runs WHERE task_id = ?", (task_id,)).fetchone()[0]
 
 
+# --- auditoría del cerebro (brain_runs / brain_decisions) ---------------------------------------
+
+
+@dataclass(frozen=True)
+class BrainRun:
+    id: int
+    project_id: int
+    trigger_events: str
+    prompt: str
+    prompt_sha256: str
+    inputs: str
+    raw_output: str | None
+    parse_status: str
+    error: str | None
+    dry_run: int
+    started_at: str
+    finished_at: str | None
+    duration_s: float | None
+
+
+@dataclass(frozen=True)
+class BrainDecision:
+    id: int
+    run_id: int
+    idx: int
+    action: str
+    payload: str
+    status: str
+    result_ref: str | None
+    created_at: str
+
+
+def start_brain_run(conn: sqlite3.Connection, project_id: int, trigger_events: str, prompt: str,
+                    inputs: str, dry_run: bool) -> BrainRun:
+    """Registra el inicio de una invocación del cerebro con el prompt exacto y sus entradas (ids)."""
+    import hashlib
+
+    pid = _int(project_id, "project_id", 1, 2**53)
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    with transaction(conn):
+        cur = conn.execute(
+            "INSERT INTO brain_runs (project_id, trigger_events, prompt, prompt_sha256, inputs, dry_run)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (pid, trigger_events, prompt, digest, inputs, int(dry_run)),
+        )
+        return _get(conn, BrainRun, "brain_runs", cur.lastrowid)
+
+
+def finish_brain_run(conn: sqlite3.Connection, run_id: int, raw_output: str | None, parse_status: str,
+                     error: str | None, duration_s: float) -> BrainRun:
+    if parse_status not in ("ok", "invalid", "error"):
+        raise ValidationError(f"parse_status inválido: {parse_status!r}")
+    capped = None if raw_output is None else raw_output[:65536]
+    with transaction(conn):
+        conn.execute(
+            "UPDATE brain_runs SET raw_output = ?, parse_status = ?, error = ?, finished_at = datetime('now'),"
+            " duration_s = ? WHERE id = ?",
+            (capped, parse_status, error, float(duration_s), run_id),
+        )
+        return _get(conn, BrainRun, "brain_runs", run_id)
+
+
+def add_brain_decision(conn: sqlite3.Connection, run_id: int, idx: int, action: str, payload: str,
+                       status: str, result_ref: str | None = None) -> BrainDecision:
+    if status not in ("executed", "rejected", "dry_run"):
+        raise ValidationError(f"status de decisión inválido: {status!r}")
+    with transaction(conn):
+        cur = conn.execute(
+            "INSERT INTO brain_decisions (run_id, idx, action, payload, status, result_ref)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (run_id, _int(idx, "idx", 0, 10000), action, payload, status, result_ref),
+        )
+        return _get(conn, BrainDecision, "brain_decisions", cur.lastrowid)
+
+
+def get_brain_run(conn: sqlite3.Connection, run_id: int) -> BrainRun | None:
+    return _find(conn, BrainRun, "brain_runs", run_id)
+
+
+def list_brain_runs(conn: sqlite3.Connection, project_id: int, limit: int = 20) -> list[BrainRun]:
+    rows = conn.execute(
+        "SELECT * FROM brain_runs WHERE project_id = ? ORDER BY id DESC LIMIT ?",
+        (project_id, _int(limit, "limit", 1, 1000)),
+    )
+    return [BrainRun(**dict(r)) for r in rows]
+
+
+def list_brain_decisions(conn: sqlite3.Connection, run_id: int) -> list[BrainDecision]:
+    rows = conn.execute("SELECT * FROM brain_decisions WHERE run_id = ? ORDER BY idx", (run_id,))
+    return [BrainDecision(**dict(r)) for r in rows]
+
+
 def list_active_runs(conn: sqlite3.Connection) -> list[Run]:
     """Ejecuciones marcadas como activas (al arrancar la app, son las que quedaron colgadas)."""
     rows = conn.execute("SELECT * FROM runs WHERE status = 'running' ORDER BY id")

@@ -497,7 +497,7 @@ def services(cfg, db, git, app_paths, ws):
 
     def make(extra="enabled = true\n"):
         config = cfg(extra)
-        return Services(config=config, db=db, worker=Worker(config.claude, db), guard=ChatGuard({111}), git=git)
+        return Services(config=config, db=db, worker=Worker(config.claude, db), guard=ChatGuard({111}), git=git, app_paths=app_paths)
 
     yield make
     close_security_log()
@@ -688,3 +688,21 @@ def test_cli_rules_and_context(services, db, git, ws, app_paths, conn):
     lines.clear()
     cli.knowledge_command(app_paths, "contexto", argparse.Namespace(accion="listar"), out=lines.append)
     assert any("approved #1  deploy manual" in ln for ln in lines)
+
+
+def test_cerebro_command(services, db, git, ws, conn, monkeypatch):
+    from coclody.brain import service as brain_service
+    from coclody.brain.schema import Decision
+
+    off = services("enabled = false\n")
+    assert "no está activado" in telegram(off, "/cerebro")[0]
+
+    s = active(services, db, git, ws)
+    # Cerebro falso: no corre Claude, devuelve un plan de simulacro.
+    outcome = brain_service.BrainOutcome(run_id=1, parse_status="ok",
+                                         decisions=[Decision("wait", {}, "nada que hacer")],
+                                         error=None, plan="🧠 Simulacro del cerebro (run #1)...")
+    # run_brain_dry importa coclody.brain.service adentro, así que parcheamos ahí.
+    monkeypatch.setattr(brain_service, "run_once", lambda *a, **k: outcome)
+    (reply,) = telegram(s, "/cerebro")
+    assert "Simulacro del cerebro" in reply

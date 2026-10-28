@@ -243,7 +243,7 @@ Estos son supuestos explícitos del diseño. Si alguno no se cumple en tu caso, 
 
 ## Orquestador (modo v2)
 
-> En construcción, por etapas. Hoy (etapa 3) están los proyectos, los worktrees, los workers en paralelo con sus commits, y las reglas y el contexto por proyecto; el cerebro, los resúmenes y la web llegan en las etapas siguientes. Con `[orquestador] enabled = false` (el default), CoClody funciona exactamente como antes.
+> En construcción, por etapas. Hoy (etapa 4) están los proyectos, los worktrees, los workers en paralelo con sus commits, las reglas y el contexto por proyecto, y el **cerebro en modo simulacro** (decide y registra, no ejecuta); la ejecución real, los resúmenes y la web llegan en las etapas siguientes. Con `[orquestador] enabled = false` (el default), CoClody funciona exactamente como antes.
 
 Un **cerebro** (otra instancia de Claude Code que solo decide) coordina varios **workers** de Claude Code que trabajan en paralelo, cada uno en su propio worktree de git del **proyecto activo**.
 
@@ -286,6 +286,15 @@ Cada proyecto tiene sus **reglas** (cómo querés que se resuelvan las cosas) y 
 - Antes de cada tarea, el HEAD del worker se guarda en `refs/coclody/backup/<worker>/…`: aunque algo reescriba la rama, lo anterior se recupera.
 - Después de cada tarea, CoClody verifica que el worktree siga en su rama, que su HEAD no se haya movido por fuera de CoClody, que ninguna rama que no sea de un worker (`main`, la base, otras) haya cambiado o desaparecido, y que la lista de worktrees sea la misma. Si algo no cierra, la tarea falla con el motivo, y **ese worker se detiene** (no toma más tareas) hasta que revises y reinicies CoClody.
 - Con el orquestador activado no corre el worker de siempre: una tarea vieja sin worker queda en cola sin ejecutarse (cancelala o asignala de nuevo con `/nueva`).
+
+### El cerebro (simulacro)
+
+`/cerebro` corre el **cerebro** una vez y te muestra qué haría, **sin ejecutar nada**. Es otra instancia de Claude Code, dedicada solo a decidir: recibe las reglas, el contexto aprobado, los últimos resúmenes de los workers y la cola, y responde un JSON con decisiones (encolar una tarea, preguntarte algo, responder la pregunta de un worker, proponer contexto, o esperar).
+
+- **Simulacro inocuo por construcción.** En esta etapa no existe ningún camino de código que lleve a cabo una decisión: todas se guardan en la auditoría con estado `dry_run`. Podés dejarlo corriendo y revisar después qué habría hecho.
+- **Sin herramientas.** El cerebro corre con `--tools ""` (no puede leer, escribir ni ejecutar nada; verificado con Claude real) y en una carpeta vacía fuera de los repos, para no cargar un `CLAUDE.md` del proyecto.
+- **Los resúmenes son datos, no órdenes.** Entran al prompt dentro de un bloque delimitado con un marcador aleatorio por invocación (que se borra si aparece en el propio contenido), y las instrucciones fijas le ordenan tratarlos como información. Además, su salida se valida contra un **esquema cerrado, todo o nada**: si algo no cierra (JSON inválido, una clave de más, una acción que no existe, un worker inexistente), se descarta la respuesta entera y queda registrada como inválida. El esquema no puede expresar nada peligroso: no hay forma de pedir un comando, una ruta o un cambio de configuración.
+- **Auditoría reconstruible.** Cada corrida guarda el prompt exacto que vio el modelo (con las reglas, el contexto y los resúmenes inline), su SHA-256, los ids de lo que entró, la salida cruda y cada decisión con su JSON (`brain_runs` y `brain_decisions`).
 
 ### Qué está garantizado y cómo
 

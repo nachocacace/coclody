@@ -53,6 +53,7 @@ ORCHESTRATOR_COMMANDS = (
     BotCommand("worker", "Ver los workers o reanudar uno: /worker <id> reanudar"),
     BotCommand("reglas", "Ver o editar las reglas del proyecto"),
     BotCommand("contexto", "Ver el contexto y aprobar borradores"),
+    BotCommand("cerebro", "Correr el cerebro en simulacro y ver qué haría"),
 )
 
 YES, NO = "sí", "no"
