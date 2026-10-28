@@ -13,12 +13,21 @@ from coclody.orchestrator.claude_runner import ClaudeResult
 from coclody.orchestrator.worker import (
     CANCEL_SHUTDOWN,
     CANCEL_USER,
-    QUESTION_MARKER,
     CancelRegistry,
     Worker,
     build_prompt,
-    extract_question,
+    new_nonce,
+    parse_question,
+    question_markers,
 )
+
+NONCE = new_nonce()
+MARK = question_markers(NONCE)[1][0]  # marcador de pregunta abierta con este nonce
+
+
+def extract_question(text):
+    parsed = parse_question(text, NONCE)
+    return parsed[0] if parsed else None
 
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
 
@@ -33,6 +42,16 @@ def result(status="ok", text="Listo, hice X.", session=SESSION, exit_code=0):
         stdout_truncated=False,
         duration_s=0.1,
     )
+
+
+def question_result(question, session=SESSION):
+    """Resultado callable que termina con el marcador que el prompt indicó (con el nonce real de la run)."""
+    from tests.markers import ask
+
+    def run(inv, cancel):
+        return result(text=f"Revisé todo.\n\n{ask(inv.stdin.decode(), question)}", session=session)
+
+    return run
 
 
 class FakeRunner:
@@ -96,7 +115,7 @@ def test_happy_path(conn, make_worker, ws):
     (inv,) = runner.calls
     assert inv.cwd == (ws / "proj").resolve()
     prompt = inv.stdin.decode()
-    assert "hacer algo" in prompt and "con detalle" in prompt and QUESTION_MARKER in prompt
+    assert "hacer algo" in prompt and "con detalle" in prompt and "COCLODY_PREGUNTA" in prompt
     (run,) = repo.list_runs(conn, t.id)
     assert (run.status, run.session_id, run.summary) == ("ok", SESSION, "Listo, hice X.")
     kinds = [(e.kind, e.message) for e in repo.list_events(conn, t.id)]
@@ -126,7 +145,7 @@ def test_failure(conn, make_worker, status):
 def test_question_then_answer_then_resume(conn, make_worker):
     t = queued(conn, "migrar base")
     worker, runner = make_worker(
-        result(text=f"Revisé todo.\n\n{QUESTION_MARKER} ¿Qué motor uso, Postgres o MySQL?"),
+        question_result("¿Qué motor uso, Postgres o MySQL?"),
         result(text="Migré a Postgres.", session="223e4567-e89b-12d3-a456-426614174000"),
     )
     assert worker.run_next().status == "waiting_input"
@@ -232,11 +251,11 @@ def test_recover(conn, make_worker):
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        (f"bla\n{QUESTION_MARKER} ¿cuál?", "¿cuál?"),
-        (f"bla\n{QUESTION_MARKER} ¿cuál?\n\n  ", "¿cuál?"),
-        (f"{QUESTION_MARKER} ¿a?\nluego seguí y terminé", None),  # no es la última línea
-        (f"bla {QUESTION_MARKER} ¿cuál?", None),  # no empieza la línea
-        (f"bla\n{QUESTION_MARKER}   ", None),
+        (f"bla\n{MARK} ¿cuál?", "¿cuál?"),
+        (f"bla\n{MARK} ¿cuál?\n\n  ", "¿cuál?"),
+        (f"{MARK} ¿a?\nluego seguí y terminé", None),  # no es la última línea
+        (f"bla {MARK} ¿cuál?", None),  # no empieza la línea
+        (f"bla\n{MARK}   ", None),
         ("", None),
         (None, None),
     ],
@@ -246,7 +265,7 @@ def test_extract_question(text, expected):
 
 
 def test_extract_question_truncates():
-    assert len(extract_question(f"{QUESTION_MARKER} " + "x" * 5000)) == 4000
+    assert len(extract_question(f"{MARK} " + "x" * 5000)) == 4000
 
 
 def test_prompt_does_not_format_user_braces(conn):
@@ -258,12 +277,13 @@ def test_prompt_does_not_format_user_braces(conn):
 # --- de punta a punta con un claude falso ------------------------------------------------
 
 FAKE = """#!{python}
-import json, sys
+import json, re, sys
 prompt = sys.stdin.read()
 if "Respuesta: azul" in prompt:
     text = "Pinté todo de azul."
 else:
-    text = "Necesito saber algo.\\n{marker} ¿De qué color?"
+    marker = re.search(r"COCLODY_PREGUNTA_[0-9a-f]+:", prompt).group(0)  # el nonce que indicó el prompt
+    text = "Necesito saber algo.\\n" + marker + " ¿De qué color?"
 print(json.dumps({{"type": "result", "is_error": False, "session_id": "{session}", "result": text}}))
 """
 
@@ -272,7 +292,7 @@ print(json.dumps({{"type": "result", "is_error": False, "session_id": "{session}
 def test_end_to_end_with_fake_claude(conn, db, ws, tmp_path):
     exe = tmp_path / "bin" / "claude"
     exe.parent.mkdir()
-    exe.write_text(FAKE.format(python=sys.executable, marker=QUESTION_MARKER, session=SESSION))
+    exe.write_text(FAKE.format(python=sys.executable, session=SESSION))
     exe.chmod(0o755)
     cfg = ClaudeConfig(workspace_root=ws, executable=str(exe), allowed_tools=("Read",), timeout_minutes=1)
     worker = Worker(cfg, db)

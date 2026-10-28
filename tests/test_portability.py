@@ -58,6 +58,7 @@ PLATFORM_SPECIFIC: dict[str, tuple[str, set[str]]] = {
     "subprocess.CREATE_NEW_PROCESS_GROUP": ("solo Windows", {PROCESS}),
     "subprocess.CREATE_NO_WINDOW": ("solo Windows", {PROCESS}),
     "ctypes.WinDLL": ("solo Windows", {PROCESS, "tests/test_process.py"}),
+    "ctypes.windll": ("solo Windows", {"coclody/orchestrator/keepawake.py"}),
     "ctypes.WinError": ("solo Windows", {PROCESS}),
     "ctypes.get_last_error": ("solo Windows", {PROCESS}),
     "ctypes.wintypes": ("pensado para Windows; se importa solo dentro de `if sys.platform == \"win32\"`", {PROCESS}),

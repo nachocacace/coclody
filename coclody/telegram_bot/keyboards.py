@@ -49,6 +49,7 @@ BOT_COMMANDS = (
 ORCHESTRATOR_COMMANDS = (
     BotCommand("proyectos", "Listar los proyectos"),
     BotCommand("proyecto", "Cambiar de proyecto: /proyecto <nombre>"),
+    BotCommand("worker", "Ver los workers o reanudar uno: /worker <id> reanudar"),
 )
 
 YES, NO = "sí", "no"

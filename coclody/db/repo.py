@@ -25,7 +25,9 @@ TASK_TRANSITIONS: dict[str, frozenset[str]] = {
     "pending": frozenset({"queued", "waiting_input", "cancelled"}),
     "waiting_input": frozenset({"pending", "queued", "cancelled"}),
     "queued": frozenset({"pending", "running", "cancelled"}),
-    "running": frozenset({"done", "failed", "waiting_input", "cancelled"}),
+    # running → queued: solo para devolver una tarea a la cola cuando se topó con el límite de uso de
+    # la suscripción (no es un fallo). El enfriamiento y el tope de ejecuciones evitan que gire en loop.
+    "running": frozenset({"done", "failed", "waiting_input", "queued", "cancelled"}),
     "failed": frozenset({"queued", "cancelled"}),
     "done": frozenset(),
     "cancelled": frozenset(),
@@ -441,6 +443,11 @@ def list_runs(conn: sqlite3.Connection, task_id: int) -> list[Run]:
     return [Run(**dict(row)) for row in rows]
 
 
+def count_runs(conn: sqlite3.Connection, task_id: int) -> int:
+    """Cuántas veces se ejecutó (o se está ejecutando) una tarea. Para el tope de reintentos."""
+    return conn.execute("SELECT count(*) FROM runs WHERE task_id = ?", (task_id,)).fetchone()[0]
+
+
 def list_active_runs(conn: sqlite3.Connection) -> list[Run]:
     """Ejecuciones marcadas como activas (al arrancar la app, son las que quedaron colgadas)."""
     rows = conn.execute("SELECT * FROM runs WHERE status = 'running' ORDER BY id")
@@ -551,16 +558,22 @@ class TaskCommit:
     deletions: int
     big_change: int
     created_at: str
+    sensitive: str = ""
+
+    @property
+    def sensitive_list(self) -> list[str]:
+        return [c for c in self.sensitive.split(",") if c]
 
 
 def add_task_commit(conn: sqlite3.Connection, task_id: int, run_id: int | None, project_id: int, worker: str,
                     base_sha: str, head_sha: str, files: int, insertions: int, deletions: int,
-                    big_change: bool) -> TaskCommit:
+                    big_change: bool, sensitive: str = "") -> TaskCommit:
     with transaction(conn):
         cur = conn.execute(
             "INSERT INTO task_commits (task_id, run_id, project_id, worker, base_sha, head_sha, files, insertions,"
-            " deletions, big_change) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (task_id, run_id, project_id, worker, base_sha, head_sha, files, insertions, deletions, int(big_change)),
+            " deletions, big_change, sensitive) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, run_id, project_id, worker, base_sha, head_sha, files, insertions, deletions,
+             int(big_change), sensitive),
         )
         return _get(conn, TaskCommit, "task_commits", cur.lastrowid)
 

@@ -30,6 +30,7 @@ import json
 import os
 import re
 import threading
+from collections.abc import Sequence
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,6 +77,8 @@ def build_invocation(
     workdir_rel: str | None = None,
     resume_session: str | None = None,
     base_env: Mapping[str, str] | None = None,
+    deny_tools: Sequence[str] = (),
+    settings_json: str | None = None,
 ) -> Invocation:
     """Arma (y valida) todo lo necesario para lanzar Claude Code. No ejecuta nada."""
     text = _validate_prompt(prompt)
@@ -87,6 +90,10 @@ def build_invocation(
     if bad:
         raise SandboxError(f"herramientas inválidas en la config: {', '.join(map(repr, bad))}")
     base_names = list(dict.fromkeys(t.split("(", 1)[0] for t in tools))
+    deny = list(dict.fromkeys(deny_tools))
+    bad_deny = [t for t in deny if not is_valid_tool_spec(t)]
+    if bad_deny:
+        raise SandboxError(f"reglas de denegacion invalidas: {', '.join(map(repr, bad_deny))}")
 
     argv = [
         str(exe),
@@ -100,6 +107,10 @@ def build_invocation(
     ]
     if tools:
         argv += ["--allowedTools", ",".join(tools)]
+    if deny:
+        argv += ["--disallowedTools", ",".join(deny)]
+    if settings_json is not None:
+        argv += ["--settings", settings_json]
     if resume_session is not None:
         if not isinstance(resume_session, str) or not _SESSION_RE.fullmatch(resume_session):
             raise SandboxError("session_id inválido para --resume")
@@ -153,7 +164,11 @@ def run_claude(inv: Invocation, cancel: threading.Event | None = None) -> Claude
     elif parsed is None:
         status, summary = "error", "La salida de Claude Code no es el JSON esperado."
     elif proc.exit_code != 0 or parsed.get("is_error") is not False:
-        status, summary = "error", result_text or f"Claude Code terminó con código {proc.exit_code}."
+        detail = result_text or f"Claude Code terminó con código {proc.exit_code}."
+        # Límite de uso de la suscripción: no es un fallo de la tarea. Se distingue para pausar la cola
+        # y reintentar, en vez de marcar la tarea como fallida (ver worker/pool).
+        status = "usage_limited" if _is_usage_limit(f"{detail}\n{stderr_tail}") else "error"
+        summary = detail
     else:
         status, summary = "ok", result_text or "(sin texto de resultado)"
 
@@ -171,6 +186,17 @@ def run_claude(inv: Invocation, cancel: threading.Event | None = None) -> Claude
         stdout_truncated=proc.stdout_truncated,
         duration_s=proc.duration_s,
     )
+
+
+_USAGE_LIMIT_RE = re.compile(
+    r"usage limit|rate limit|too many requests|quota|límite de uso|insufficient_quota|overloaded|"
+    r"429|resource[_ ]exhausted",
+    re.I,
+)
+
+
+def _is_usage_limit(text: str) -> bool:
+    return bool(text) and bool(_USAGE_LIMIT_RE.search(text))
 
 
 def _runs_through_cmd(exe: Path) -> bool:

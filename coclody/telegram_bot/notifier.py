@@ -68,6 +68,8 @@ def _commit(commit: TaskCommit | None) -> str:
             f"+{commit.insertions} −{commit.deletions}")
     if commit.big_change:
         line += "\n⚠️ Cambio grande: revisalo con cuidado antes de mergear."
+    if commit.sensitive_list:
+        line += "\n⚠️ Tocó archivos sensibles (" + ", ".join(commit.sensitive_list) + "): revisalos antes de mergear."
     return line
 
 

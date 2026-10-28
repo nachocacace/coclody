@@ -18,7 +18,16 @@ from telegram import Update
 from coclody.config import ClaudeConfig, Config, TelegramConfig, UpdatesConfig
 from coclody.db import connection_factory, repo
 from coclody.orchestrator.claude_runner import ClaudeResult
-from coclody.orchestrator.worker import QUESTION_MARKER, YES_NO_MARKER, CancelRegistry, Worker, parse_question
+from coclody.orchestrator.worker import (
+    QUESTION_BASE,
+    YES_NO_BASE,
+    CancelRegistry,
+    Worker,
+    new_nonce,
+    parse_question,
+    question_markers,
+)
+from tests.markers import ask
 from coclody.security import ChatGuard, close_security_log, configure_security_log
 from coclody.telegram_bot.app import Services, build_application
 from coclody.telegram_bot.keyboards import BUTTON_HELP, BUTTON_LIST, BUTTON_NEW, parse_callback
@@ -43,14 +52,20 @@ def claude(text: str) -> ClaudeResult:
 
 
 class Runner:
-    """Claude falso: la primera ejecución devuelve ``first``; las siguientes terminan."""
+    """Claude falso: en la primera ejecución pregunta ``question`` (del tipo ``kind``); después termina."""
 
-    def __init__(self, first: str):
-        self.first, self.prompts = first, []
+    def __init__(self, question: str, kind: str = "yes_no"):
+        self.question, self.kind, self.prompts = question, kind, []
+        self.first = None  # algunos tests lo sobreescriben con un texto de resultado literal
 
     def __call__(self, inv, cancel):
-        self.prompts.append(inv.stdin.decode())
-        return claude(self.first if len(self.prompts) == 1 else "Listo.")
+        prompt = inv.stdin.decode()
+        self.prompts.append(prompt)
+        if len(self.prompts) > 1:
+            return claude("Listo.")
+        if self.first is not None:
+            return claude(self.first)
+        return claude(ask(prompt, self.question, self.kind))
 
 
 class SpyDb:
@@ -75,7 +90,7 @@ def env(app_paths, conn, tmp_path):
     exe.write_bytes(b"")
     exe.chmod(0o755)
     cfg = ClaudeConfig(workspace_root=ws, executable=str(exe), allowed_tools=("Read(./**)",), timeout_minutes=1)
-    runner = Runner(f"Necesito confirmar.\n{YES_NO_MARKER} ¿Borro los temporales?")
+    runner = Runner("¿Borro los temporales?", "yes_no")
     worker = Worker(cfg, db, CancelRegistry(), runner)
     config = Config(TelegramConfig(frozenset({ME})), cfg, UpdatesConfig(False, None, 24))
     services = Services(config=config, db=db, worker=worker, guard=ChatGuard({ME}))
@@ -334,7 +349,7 @@ def test_yes_no_button_only_counts_on_its_own_message(env):
 
 
 def test_open_question_has_no_yes_no_buttons(env):
-    env.runner.first = f"Necesito un dato.\n{QUESTION_MARKER} ¿Qué carpeta?"
+    env.runner.question, env.runner.kind = "¿Qué carpeta?", "open"
 
     async def scenario():
         params, _ = await ask_yes_no(env)
@@ -346,17 +361,16 @@ def test_open_question_has_no_yes_no_buttons(env):
     assert repo.list_questions(env.conn, 1)[0].kind == "open"
 
 
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        (f"{YES_NO_MARKER} ¿Sigo?", ("¿Sigo?", "yes_no")),
-        (f"{QUESTION_MARKER} ¿Cuál?", ("¿Cuál?", "open")),
-        (f"{YES_NO_MARKER}   ", None),
-        ("COCLODY_PREGUNTA_SINO ¿sin dos puntos?", None),
-    ],
-)
-def test_parse_question_kinds(text, expected):
-    assert parse_question(text) == expected
+def test_parse_question_kinds():
+    nonce = new_nonce()
+    sino, abierta = question_markers(nonce)[0][0], question_markers(nonce)[1][0]
+    assert parse_question(f"{sino} ¿Sigo?", nonce) == ("¿Sigo?", "yes_no")
+    assert parse_question(f"{abierta} ¿Cuál?", nonce) == ("¿Cuál?", "open")
+    assert parse_question(f"{sino}   ", nonce) is None
+    assert parse_question(f"{QUESTION_BASE}_SINO ¿sin dos puntos?", nonce) is None
+    # Un archivo del repo con el marcador base pero sin el nonce no falsifica una pregunta.
+    assert parse_question(f"{QUESTION_BASE}: ¿falsa?", nonce) is None
+    assert parse_question(f"{YES_NO_BASE}_otracosa: ¿falsa?", nonce) is None
 
 
 def test_prompt_explains_yes_no_marker(env):
@@ -365,7 +379,7 @@ def test_prompt_explains_yes_no_marker(env):
         await env.app.shutdown()
 
     run(scenario())
-    assert YES_NO_MARKER in env.runner.prompts[0] and QUESTION_MARKER in env.runner.prompts[0]
+    assert YES_NO_BASE in env.runner.prompts[0] and QUESTION_BASE in env.runner.prompts[0]
 
 
 # --- teclado fijo --------------------------------------------------------------------------------------
@@ -450,9 +464,9 @@ def test_keyboard_label_sent_as_reply_to_a_question_is_not_an_answer(env):
     assert repo.list_questions(env.conn, 1)[0].status == "open"
 
 
-@pytest.mark.parametrize("marker", [YES_NO_MARKER, QUESTION_MARKER])
-def test_cancel_button_on_a_question_cancels_the_waiting_task(env, marker):
-    env.runner.first = f"Necesito un dato.\n{marker} ¿Sigo?"
+@pytest.mark.parametrize("kind", ["yes_no", "open"])
+def test_cancel_button_on_a_question_cancels_the_waiting_task(env, kind):
+    env.runner.question, env.runner.kind = "¿Sigo?", kind
 
     async def scenario():
         params, message = await ask_yes_no(env)

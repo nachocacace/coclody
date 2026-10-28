@@ -21,7 +21,8 @@ from telegram import Update
 from coclody.config import ClaudeConfig, Config, TelegramConfig, UpdatesConfig
 from coclody.db import connection_factory, repo
 from coclody.orchestrator.claude_runner import ClaudeResult
-from coclody.orchestrator.worker import QUESTION_MARKER, CancelRegistry, Worker
+from coclody.orchestrator.worker import CancelRegistry, Worker
+from tests.markers import ask
 from coclody.security import ChatGuard, close_security_log, configure_security_log
 from coclody.telegram_bot.app import Services, build_application
 from coclody.telegram_bot.notifier import flush_notifications
@@ -47,7 +48,7 @@ class ScriptedRunner:
         title = "A" if "Tarea A" in prompt else "B"
         self.prompts.setdefault(title, []).append(prompt)
         if len(self.prompts[title]) == 1:
-            return claude(f"Necesito un dato.\n{QUESTION_MARKER} ¿Qué color para la tarea {title}?")
+            return claude(ask(prompt, f"¿Qué color para la tarea {title}?"))
         return claude(f"Listo {title}.")
 
 

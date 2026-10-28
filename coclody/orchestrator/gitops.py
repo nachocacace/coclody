@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,6 +54,9 @@ class Git:
     def __init__(self, executable: Path, hooks_dir: Path):
         self.executable = executable
         self.hooks_dir = hooks_dir
+        # Los worktrees comparten refs y objetos del mismo repo. Serializamos las operaciones de git que
+        # escriben (commit, update-ref, crear worktree) para que dos workers en paralelo no choquen locks.
+        self._write_lock = threading.Lock()
 
     @classmethod
     def find(cls, workspace_root: Path, hooks_dir: Path) -> Git:
@@ -112,8 +116,22 @@ class Git:
     def is_ancestor(self, path: Path, older: str, newer: str) -> bool:
         return self._returncode(path, "merge-base", "--is-ancestor", older, newer) == 0
 
+    def has_identity(self, path: Path) -> bool:
+        """True si hay user.name y user.email: sin eso, el commit de CoClody falla."""
+        try:
+            name = self._run(path, "config", "user.name").strip()
+            email = self._run(path, "config", "user.email").strip()
+        except GitError:
+            return False
+        return bool(name and email)
+
     def has_changes(self, path: Path) -> bool:
         return bool(self._run(path, "status", "--porcelain", "--untracked-files=all").strip())
+
+    def changed_files(self, path: Path, base: str, head: str) -> list[str]:
+        """Rutas (relativas, con /) que cambiaron entre dos commits."""
+        out = self._run(path, "diff", "--name-only", "--no-renames", base, head)
+        return [line.strip() for line in out.splitlines() if line.strip()]
 
     def numstat(self, path: Path, base: str, head: str) -> tuple[int, int, int]:
         """(archivos, líneas agregadas, líneas borradas) entre dos commits. Los binarios cuentan como archivo."""
@@ -134,22 +152,25 @@ class Git:
             raise GitError(f"nombre de respaldo inválido: {name!r}")
         ref = f"refs/coclody/backup/{name}"
         self._run(path, "check-ref-format", ref)
-        self._run(path, "update-ref", ref, sha)
+        with self._write_lock:
+            self._run(path, "update-ref", ref, sha)
         return ref
 
     def commit_all(self, path: Path, message: str) -> str:
         """``git add -A`` y commit (sin hooks) en el worktree ``path``. Devuelve el commit nuevo."""
-        self._run(path, "add", "--all", "--", ".")
-        self._run(path, "commit", "--no-verify", "--quiet", "-m", message)
-        return self.head(path)
+        with self._write_lock:
+            self._run(path, "add", "--all", "--", ".")
+            self._run(path, "commit", "--no-verify", "--quiet", "-m", message)
+            return self.head(path)
 
     def add_worktree(self, repo: Path, path: Path, branch: str, base: str | None) -> None:
         """Crea un worktree en ``path``. Con ``base`` crea la rama ``branch`` desde ahí; sin ``base`` la usa."""
         self._check_branch_name(repo, branch)
-        if base is None:
-            self._run(repo, "worktree", "add", "--", str(path), branch)
-        else:
-            self._run(repo, "worktree", "add", "-b", branch, "--", str(path), base)
+        with self._write_lock:
+            if base is None:
+                self._run(repo, "worktree", "add", "--", str(path), branch)
+            else:
+                self._run(repo, "worktree", "add", "-b", branch, "--", str(path), base)
 
     # --- ejecución ---------------------------------------------------------------------------------
 
@@ -173,6 +194,8 @@ class Git:
             "-c", f"core.hooksPath={self.hooks_dir}",
             "-c", "core.fsmonitor=false",
             "-c", "protocol.allow=never",
+            "-c", "gc.auto=0",
+            "-c", "maintenance.auto=false",
             "-C", str(cwd),
             *args,
         ]

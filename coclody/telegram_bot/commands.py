@@ -197,6 +197,36 @@ class Commands:
                 return f"No pude asignar la tarea #{task_id}: {exc}"
         return f"La tarea #{task.id} quedó en la cola de {worker}."
 
+    WORKER_STATE_LABELS = {"idle": "libre", "running": "ejecutando", "paused": "en pausa", "error": "detenido"}
+
+    def workers(self, arg: str = "") -> str:
+        """``/worker`` lista los workers; ``/worker <id> reanudar`` rehabilita uno detenido."""
+        parts = arg.split()
+        with self._db() as conn:
+            project = prepo.active_project(conn)
+            if project is None:
+                return "No hay proyecto activo. Elegí uno con /proyecto <nombre>."
+            if len(parts) >= 2 and parts[1].lower() in ("reanudar", "resume"):
+                name = parts[0]
+                row = prepo.get_worker(conn, project.id, name)
+                if row is None:
+                    return f"No existe el worker {name!r} en el proyecto {project.name}."
+                if row.state != "error":
+                    return f"El worker {name} no está detenido (está {self.WORKER_STATE_LABELS.get(row.state, row.state)})."
+                prepo.set_worker_state(conn, project.id, name, "idle")
+                return f"Reanudé el worker {name}: vuelve a tomar tareas."
+            rows = prepo.list_workers(conn, project.id)
+        if parts:
+            return "Uso: /worker  (lista)  ·  /worker <id> reanudar"
+        lines = [f"{self._worker_emoji(w.state)} {w.name}: {self.WORKER_STATE_LABELS.get(w.state, w.state)}"
+                 + (f" (tarea #{w.current_task_id})" if w.current_task_id else "") for w in rows]
+        tip = "\n\nUn worker detenido se reanuda con /worker <id> reanudar." if any(w.state == "error" for w in rows) else ""
+        return (f"Workers de {project.name}:\n" + "\n".join(lines) + tip) if rows else "El proyecto no tiene workers."
+
+    @staticmethod
+    def _worker_emoji(state: str) -> str:
+        return {"idle": "🟢", "running": "⚙️", "paused": "⏸️", "error": "🛑"}.get(state, "•")
+
     def remember_task_prompt(self, chat_id: int, message_id: int) -> None:
         """Guarda el pedido de título en la base: una respuesta sigue valiendo después de reiniciar."""
         with self._db() as conn:

@@ -182,6 +182,16 @@ def _check_orchestrator(paths: AppPaths, cfg, out) -> bool:
         tag = {"ok": "[ok]", "missing": "[aviso]"}.get(report.status, "[ERROR]")
         out(f"{tag} Worktree {report.spec.name} ({report.spec.branch}): {report.problem or 'bien'}")
         ok = ok and report.status != "error"
+    try:
+        has_identity = git.has_identity(project.root_path)
+    except GitError:
+        has_identity = False
+    if has_identity:
+        out("[ok] Identidad de git configurada (los commits de CoClody la usan)")
+    else:
+        out("[ERROR] git no tiene user.name/user.email en este repo; los commits de los workers fallarían. "
+            "Configuralos con: git -C <repo> config user.name \"...\" y user.email \"...\"")
+        ok = False
     return ok
 
 

@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -67,6 +68,7 @@ from coclody.config import Config
 from coclody.db import DbFactory
 from coclody.orchestrator import projects as project_ops
 from coclody.orchestrator.gitops import Git, GitError
+from coclody.orchestrator.keepawake import KeepAwake
 from coclody.orchestrator.worker import CANCEL_SHUTDOWN, Worker
 from coclody.paths import AppPaths
 from coclody.security import ChatGuard
@@ -96,6 +98,9 @@ NOTIFY_INTERVAL_S = 3.0
 SHUTDOWN_WAIT_S = 30.0
 UPDATE_FIRST_CHECK_S = 60.0
 POLL_WATCH_S = 5.0
+USAGE_COOLDOWN_S = 900.0  # cuánto esperar antes de reintentar tras toparse con el límite de uso
+USAGE_PAUSED_MSG = ("⏸️ Pausé los workers: Claude Code reportó el límite de uso de la suscripción. "
+                    "Reintento en unos %d minutos. No hace falta que hagas nada.")
 POLLING_DEAD = (
     "El polling de Telegram se detuvo por un error (%s). CoClody sigue abierto pero NO recibe mensajes "
     "ni botones; no va a empezar tareas nuevas ni enviar avisos. La tarea en curso, si hay, termina sola. "
@@ -120,6 +125,10 @@ class Services:
     stopped: bool = False
     # Causa, si el polling murió mientras CoClody seguía abierto (ver _polling_watch_loop).
     polling_error: str | None = None
+    # Momento (monotonic) en que la cola se pausó por el límite de uso de la suscripción, o None.
+    usage_paused_at: float | None = None
+    usage_notified: bool = False
+    keepawake: KeepAwake = field(default_factory=KeepAwake)
     # Telegram fecha los mensajes con resolución de segundos.
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC).replace(microsecond=0))
 
@@ -184,6 +193,7 @@ def build_application(
         (("reintentar",), lambda u: c.retry(_args(u))),
         (("proyectos",), lambda u: list_projects(services)),
         (("proyecto",), lambda u: switch_project(services, _args(u))),
+        (("worker",), lambda u: c.workers(_args(u)) if services.config.orchestrator.enabled else ORCHESTRATOR_OFF),
     ):
         app.add_handler(CommandHandler(list(names), _reply_with(fn), filters=only_new))
 
@@ -459,9 +469,11 @@ async def _post_init(app: Application) -> None:
     await setup_menu(app.bot, services.config.telegram.allowed_chat_ids, services.config.orchestrator.enabled)
     services.stop = asyncio.Event()
     if services.config.orchestrator.enabled:
+        services.keepawake.start()  # que la máquina no se duerma con tareas en curso
+    if services.config.orchestrator.enabled:
         # Un bucle por worker; el modo de un worker (y su carpeta de trabajo común) no corre.
         workers = [
-            asyncio.create_task(_pool_loop(services, f"w{i}"), name=f"coclody-worker-w{i}")
+            asyncio.create_task(_pool_loop(app, services, f"w{i}"), name=f"coclody-worker-w{i}")
             for i in range(1, services.config.orchestrator.workers + 1)
         ]
     else:
@@ -497,6 +509,7 @@ async def _stop_services(app: Application) -> None:
         return
     services.stopped = True
     services.stop.set()
+    services.keepawake.stop()
     services.worker.cancels.cancel_all(CANCEL_SHUTDOWN)
     done, pending = await asyncio.wait(services.background, timeout=SHUTDOWN_WAIT_S)
     for task in pending:
@@ -509,11 +522,11 @@ async def _stop_services(app: Application) -> None:
 
 async def _worker_loop(services: Services) -> None:
     while not services.stop.is_set():
-        if services.polling_error is not None:  # en pausa: nadie podría cancelar ni responder
-            await _sleep_or_stop(services.stop, WORKER_IDLE_S)
+        if await _paused(services):
             continue
         try:
             task = await asyncio.to_thread(services.worker.run_next)
+            _note_usage_limit(services, services.worker.usage_limited)
         except Exception:
             log.exception("Error en el worker")
             task = None
@@ -521,13 +534,13 @@ async def _worker_loop(services: Services) -> None:
             await _sleep_or_stop(services.stop, WORKER_IDLE_S)
 
 
-async def _pool_loop(services: Services, name: str) -> None:
+async def _pool_loop(app: Application, services: Services, name: str) -> None:
     while not services.stop.is_set():
-        if services.polling_error is not None:  # en pausa, como el worker de siempre
-            await _sleep_or_stop(services.stop, WORKER_IDLE_S)
+        if await _paused(services, app):
             continue
         try:
-            task = await asyncio.to_thread(run_worker_once, services, name)
+            task, usage = await asyncio.to_thread(run_worker_once, services, name)
+            _note_usage_limit(services, usage)
         except Exception:
             log.exception("Error en el worker %s", name)
             task = None
@@ -535,25 +548,59 @@ async def _pool_loop(services: Services, name: str) -> None:
             await _sleep_or_stop(services.stop, WORKER_IDLE_S)
 
 
+async def _paused(services: Services, app: Application | None = None) -> bool:
+    """True (tras dormir un rato) si los workers deben estar en pausa: polling muerto o límite de uso."""
+    if services.polling_error is not None:  # en pausa: nadie podría cancelar ni responder
+        await _sleep_or_stop(services.stop, WORKER_IDLE_S)
+        return True
+    paused = services.usage_paused_at
+    if paused is not None:
+        if time.monotonic() - paused >= USAGE_COOLDOWN_S:
+            services.usage_paused_at, services.usage_notified = None, False
+            log.info("Reanudo los workers: pasó el enfriamiento por el límite de uso")
+            return False
+        if app is not None and not services.usage_notified:
+            services.usage_notified = True
+            await _notify_all(app, services, USAGE_PAUSED_MSG % (USAGE_COOLDOWN_S // 60))
+        await _sleep_or_stop(services.stop, WORKER_IDLE_S)
+        return True
+    return False
+
+
+def _note_usage_limit(services: Services, hit: bool) -> None:
+    if hit and services.usage_paused_at is None:
+        services.usage_paused_at = time.monotonic()
+        log.warning("Pauso los workers: una tarea se topó con el límite de uso de la suscripción")
+
+
+async def _notify_all(app: Application, services: Services, text: str) -> None:
+    for chat_id in sorted(services.config.telegram.allowed_chat_ids):
+        try:
+            await app.bot.send_message(chat_id=chat_id, text=outgoing(text), reply_markup=MAIN_KEYBOARD)
+        except Exception as exc:
+            log.warning("No se pudo avisar al chat %s: %s", chat_id, exc)
+
+
 def run_worker_once(services: Services, name: str):
-    """Corre la próxima tarea del worker ``name`` en el proyecto activo. None si no había o no puede."""
+    """Corre la próxima tarea del worker ``name``. Devuelve (tarea o None, hubo límite de uso)."""
     from coclody.db import projects as prepo
     from coclody.orchestrator.pool import WorktreeWorker
     from coclody.orchestrator.worktrees import WorkerSpec
 
     if services.git is None or services.app_paths is None:
-        return None
+        return None, False
     with services.db() as conn:
         project = prepo.active_project(conn)
         row = prepo.get_worker(conn, project.id, name) if project else None
     if row is None or row.state in ("error", "paused"):
-        return None
+        return None, False
     worker = WorktreeWorker(
         services.config, services.db, services.worker.cancels, services.git, project,
         WorkerSpec(row.name, row.branch, row.path_rel), services.app_paths.git_hooks_dir,
         services.app_paths.git_empty_config, runner=services.worker.runner,
     )
-    return worker.run_next()
+    task = worker.run_next()
+    return task, worker.usage_limited
 
 
 async def _notifier_loop(app: Application, services: Services) -> None:

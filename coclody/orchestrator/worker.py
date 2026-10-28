@@ -18,6 +18,8 @@ Ciclo de una tarea:
 from __future__ import annotations
 
 import logging
+import re
+import secrets
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -30,8 +32,33 @@ from coclody.orchestrator.sandbox import SandboxError
 
 log = logging.getLogger(__name__)
 
-QUESTION_MARKER = "COCLODY_PREGUNTA:"
-YES_NO_MARKER = "COCLODY_PREGUNTA_SINO:"
+# Marcadores con los que el worker pide un dato. Se completan con un nonce aleatorio por ejecución
+# (new_nonce): como el nonce no está en ningún archivo del repo, un archivo hostil no puede hacer que
+# el worker "cite" un marcador válido. El de sí/no se chequea primero porque su prefijo contiene al otro.
+QUESTION_BASE = "COCLODY_PREGUNTA"
+YES_NO_BASE = "COCLODY_PREGUNTA_SINO"
+# Para los tests y la compatibilidad: los marcadores sin nonce (no se usan para parsear el stream real).
+QUESTION_MARKER = QUESTION_BASE + ":"
+YES_NO_MARKER = YES_NO_BASE + ":"
+_MARKER_DEFANG_RE = re.compile(QUESTION_BASE)
+
+
+def new_nonce() -> str:
+    return secrets.token_hex(8)
+
+
+def question_markers(nonce: str) -> tuple[tuple[str, str], ...]:
+    """(marcador, tipo) para un nonce, el de sí/no primero (su prefijo contiene al de pregunta abierta)."""
+    return ((f"{YES_NO_BASE}_{nonce}:", "yes_no"), (f"{QUESTION_BASE}_{nonce}:", "open"))
+
+
+def defang_markers(text: str) -> str:
+    """Rompe cualquier aparición de la palabra del marcador en texto que se guarda o se muestra.
+
+    El resumen de una tarea puede citar un archivo que contiene "COCLODY_PREGUNTA". No afecta al parseo
+    (que usa el nonce), pero evita confundir en logs, Telegram y, más adelante, en el prompt del cerebro.
+    """
+    return _MARKER_DEFANG_RE.sub("COCLODY_PREG​UNTA", text) if text else text
 CANCEL_USER = "user"
 CANCEL_SHUTDOWN = "shutdown"
 
@@ -98,6 +125,10 @@ class Worker:
     db: DbFactory
     cancels: CancelRegistry = field(default_factory=CancelRegistry)
     runner: Runner = run_claude
+    # Tope de ejecuciones por tarea (None = sin tope); una tarea que gira en loop no se reintenta para siempre.
+    max_task_runs: int | None = None
+    # True si la última ejecución se topó con el límite de uso de la suscripción (la lee el bucle para pausar).
+    usage_limited: bool = field(default=False)
 
     def recover(self) -> int:
         """Cierra lo que quedó a medias si CoClody se cortó. Devuelve cuántas tareas tocó."""
@@ -113,6 +144,7 @@ class Worker:
 
     def run_next(self) -> Task | None:
         """Ejecuta la próxima tarea en cola. Devuelve la tarea final o None si no había."""
+        self.usage_limited = False
         with self.db() as conn:
             task = self._next_task(conn)
             if task is None:
@@ -126,7 +158,8 @@ class Worker:
                 return None  # la cancelaron o editaron justo ahora
             run = repo.start_run(conn, task.id)
             resume = _last_session(conn, task.id, exclude_run=run.id)
-            prompt = self._prompt(task, repo.list_questions(conn, task.id, status="answered"))
+            nonce = new_nonce()
+            prompt = self._prompt(task, repo.list_questions(conn, task.id, status="answered"), nonce)
 
         try:
             result = self._execute(task, prompt, resume, cancel)
@@ -136,15 +169,15 @@ class Worker:
 
         with self.db() as conn:
             self._before_finish(conn, task, run.id, result)
-            return self._finish(conn, task, run.id, result, reason)
+            return self._finish(conn, task, run.id, result, reason, nonce)
 
     # Puntos de extensión (los redefine el worker de worktree del orquestador).
 
     def _next_task(self, conn) -> Task | None:
         return repo.next_queued_task(conn)
 
-    def _prompt(self, task: Task, answered: list[Question]) -> str:
-        return build_prompt(task, answered)
+    def _prompt(self, task: Task, answered: list[Question], nonce: str) -> str:
+        return build_prompt(task, answered, nonce)
 
     def _before_finish(self, conn, task: Task, run_id: int, result: ClaudeResult) -> None:
         pass
@@ -159,10 +192,27 @@ class Worker:
             log.exception("Falló la ejecución de la tarea %s", task.id)
             return _failure(f"Error interno al ejecutar: {type(exc).__name__}: {exc}")
 
-    def _finish(self, conn, task: Task, run_id: int, result: ClaudeResult, reason: str | None) -> Task:
+    def _finish(self, conn, task: Task, run_id: int, result: ClaudeResult, reason: str | None,
+                nonce: str) -> Task:
+        summary = defang_markers(result.summary)
         if result.session_id:
             repo.set_run_session(conn, run_id, result.session_id)
-        repo.finish_run(conn, run_id, result.status, exit_code=result.exit_code, summary=result.summary)
+
+        if result.status == "usage_limited":
+            # No es un fallo de la tarea: el run queda como error, pero la tarea vuelve a la cola para
+            # reintentar cuando el límite se libere. El bucle pausa la cola y avisa (ver app).
+            repo.finish_run(conn, run_id, "error", exit_code=result.exit_code, summary=summary)
+            self.usage_limited = True
+            if self.max_task_runs is not None and repo.count_runs(conn, task.id) >= self.max_task_runs:
+                repo.add_event(conn, task.id, "error",
+                               f"Falló tras {self.max_task_runs} ejecuciones (límite de uso). No se reintenta.",
+                               run_id=run_id)
+                return repo.transition_task(conn, task.id, "failed", expected="running")
+            repo.add_event(conn, task.id, "progress", "Pausada por el límite de uso; reintenta más tarde.",
+                           run_id=run_id)
+            return repo.transition_task(conn, task.id, "queued", expected="running")
+
+        repo.finish_run(conn, run_id, result.status, exit_code=result.exit_code, summary=summary)
 
         if result.status == "killed":
             if reason == CANCEL_USER:
@@ -173,51 +223,50 @@ class Worker:
             return repo.transition_task(conn, task.id, "failed", expected="running")
 
         if result.status != "ok":
-            repo.add_event(conn, task.id, "error", result.summary, run_id=run_id)
+            repo.add_event(conn, task.id, "error", summary, run_id=run_id)
             return repo.transition_task(conn, task.id, "failed", expected="running")
 
-        parsed = parse_question(result.result_text)
+        parsed = parse_question(result.result_text, nonce)
         if parsed:
             question, kind = parsed
             repo.add_event(conn, task.id, "question", question, run_id=run_id)
             repo.ask_question(conn, task.id, question, kind=kind)
             return repo.transition_task(conn, task.id, "waiting_input", expected="running")
-        repo.add_event(conn, task.id, "progress", result.summary, run_id=run_id)
+        repo.add_event(conn, task.id, "progress", summary, run_id=run_id)
         return repo.transition_task(conn, task.id, "done", expected="running")
 
 
-def build_prompt(task: Task, answered: list[Question]) -> str:
+def build_prompt(task: Task, answered: list[Question], nonce: str | None = None) -> str:
     answers = ""
     if answered:
         lines = "\n".join(f"- Pregunta: {q.question}\n  Respuesta: {q.answer}" for q in answered)
         answers = f"\nRespuestas del usuario a tus preguntas anteriores:\n{lines}\n"
     description = f"\n{task.description}\n" if task.description else ""
+    nonce = nonce or new_nonce()
     return PROMPT_TEMPLATE.format(
         id=task.id,
         title=task.title,
         description=description,
         answers=answers,
-        marker=QUESTION_MARKER,
-        yes_no_marker=YES_NO_MARKER,
+        marker=f"{QUESTION_BASE}_{nonce}:",
+        yes_no_marker=f"{YES_NO_BASE}_{nonce}:",
     )
 
 
-def extract_question(result_text: str | None) -> str | None:
-    """La pregunta, si la última línea no vacía del resultado empieza con un marcador."""
-    parsed = parse_question(result_text)
-    return parsed[0] if parsed else None
+def parse_question(result_text: str | None, nonce: str) -> tuple[str, str] | None:
+    """(pregunta, tipo) si la última línea no vacía es un marcador con este nonce; tipo "open" o "yes_no".
 
-
-def parse_question(result_text: str | None) -> tuple[str, str] | None:
-    """(pregunta, tipo) si la última línea no vacía empieza con un marcador; tipo es "open" o "yes_no"."""
-    if not result_text:
+    El nonce (aleatorio por ejecución, nunca en un archivo) hace que un archivo del repo no pueda
+    falsificar un marcador. Solo cuenta la última línea del stream directo de Claude (su result_text).
+    """
+    if not result_text or not nonce:
         return None
     lines = [line.strip() for line in result_text.strip().splitlines() if line.strip()]
     if not lines:
         return None
-    for marker, kind in ((YES_NO_MARKER, "yes_no"), (QUESTION_MARKER, "open")):
+    for marker, kind in question_markers(nonce):
         if lines[-1].startswith(marker):
-            question = lines[-1][len(marker) :].strip()
+            question = lines[-1][len(marker):].strip()
             if not question:
                 return None
             return (question if len(question) <= 4000 else question[:3999] + "…"), kind

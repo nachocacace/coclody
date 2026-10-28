@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,6 +101,8 @@ big_change_lines = 1000
 web_enabled = false
 web_port = 8765
 audit_retention_days = 90
+# Tope de ejecuciones por tarea: una que falla o toca el límite en loop no se reintenta para siempre.
+max_task_runs = 5
 """
 
 
@@ -151,6 +154,7 @@ class OrchestratorConfig:
     web_enabled: bool = False
     web_port: int = 8765
     audit_retention_days: int = 90
+    max_task_runs: int = 5
 
 
 @dataclass(frozen=True)
@@ -176,7 +180,7 @@ _SCHEMA = {
         "enabled", "workers", "worker_commands", "brain_calls_per_hour", "brain_calls_per_day",
         "autonomous_tasks_per_day", "max_queue_per_worker", "brain_dry_run", "prompt_budget_chars",
         "digest_every_tasks", "digest_every_minutes", "big_change_files", "big_change_lines", "web_enabled",
-        "web_port", "audit_retention_days",
+        "web_port", "audit_retention_days", "max_task_runs",
     },
 }
 
@@ -199,6 +203,7 @@ _ORCH = {
     "web_enabled": (lambda: _bool, False),
     "web_port": (lambda: _int_between(1024, 65535), 8765),
     "audit_retention_days": (lambda: _int_between(1, 3650), 90),
+    "max_task_runs": (lambda: _int_between(1, 100), 5),
 }
 
 
@@ -238,6 +243,13 @@ def load_config(paths: AppPaths, path: Path | None = None) -> Config:
         key: v.get(orch_raw, f"orquestador.{key}", check(), default=default)
         for key, (check, default) in _ORCH.items()
     }
+    # Bash de los workers solo con el sandbox de Claude Code disponible (macOS/Linux); nunca en Windows,
+    # donde un comando correría sin contención. Un comando puede ejecutar código arbitrario (conftest.py,
+    # package.json), así que sin sandbox la única opción segura es no tener Bash.
+    if orch["worker_commands"] and not _sandbox_platform():
+        v.error("orquestador.worker_commands",
+                "esta plataforma no tiene el sandbox de Claude Code; dejá la lista vacía (los workers no "
+                "pueden correr comandos acá, solo leer y editar archivos)")
 
     if v.problems:
         raise ConfigError(path, v.problems)
@@ -412,6 +424,11 @@ def _commands(value: Any) -> list[str]:
     if len(set(value)) != len(value):
         raise _Invalid("hay comandos repetidos")
     return value
+
+
+def _sandbox_platform() -> bool:
+    # Igual que pool.sandbox_available, pero sin importar el orquestador (evita un import circular en config).
+    return sys.platform in ("darwin", "linux")
 
 
 def command_problem(command: str) -> str | None:

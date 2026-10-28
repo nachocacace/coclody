@@ -274,7 +274,13 @@ CREATE TABLE runtime_state (
 """
 
 # Orden estricto: la migración N lleva la base de user_version N-1 a N.
-MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4, _V5, _V6)
+# v7: categorías de archivos sensibles tocados por un commit (CI, build, configs que ejecutan código),
+# para marcarlos en el aviso de la tarea y, más adelante, en /resumen. Vacío = nada sensible.
+_V7 = """
+ALTER TABLE task_commits ADD COLUMN sensitive TEXT NOT NULL DEFAULT '';
+"""
+
+MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4, _V5, _V6, _V7)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

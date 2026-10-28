@@ -33,6 +33,12 @@ posix_only = pytest.mark.skipif(os.name != "posix", reason="hooks ejecutables: s
 ME = 111
 
 
+def run_once(services, name):
+    """run_worker_once devuelve (tarea, usage_limited); los tests solo miran la tarea."""
+    task, _ = app_module.run_worker_once(services, name)
+    return task
+
+
 def ok(text="Listo.\nRESUMEN\nHice algo."):
     return ClaudeResult(status="ok", exit_code=0, session_id=None, result_text=text, summary=text,
                         stdout_truncated=False, duration_s=0.1)
@@ -110,7 +116,7 @@ def test_task_runs_in_its_worktree_and_coclody_commits_it(env, app_paths):
     main_before = sh_git(root, "rev-parse", "main").strip()
     task = queue(conn, "Agregar hecho.txt", "w1")
 
-    final = app_module.run_worker_once(services, "w1")
+    final = run_once(services, "w1")
     assert final.status == "done"
     (inv,) = claude.invocations
     assert inv.cwd == wt(root, "w1").resolve()
@@ -135,7 +141,7 @@ def test_task_without_changes_makes_no_commit(env):
     services, _ = build()
     head = sh_git(wt(root, "w1"), "rev-parse", "HEAD").strip()
     queue(conn, "Solo leer", "w1")
-    assert app_module.run_worker_once(services, "w1").status == "done"
+    assert run_once(services, "w1").status == "done"
     assert sh_git(wt(root, "w1"), "rev-parse", "HEAD").strip() == head
     assert conn.execute("SELECT count(*) FROM task_commits").fetchone()[0] == 0
 
@@ -144,8 +150,8 @@ def test_each_worker_only_takes_its_own_tasks_in_its_own_worktree(env):
     build, root, conn = env
     services, claude = build(action=write_file("marca.txt"))
     queue(conn, "para w2", "w2")
-    assert app_module.run_worker_once(services, "w1") is None  # w1 no tiene nada
-    assert app_module.run_worker_once(services, "w2").title == "para w2"
+    assert run_once(services, "w1") is None  # w1 no tiene nada
+    assert run_once(services, "w2").title == "para w2"
     assert [inv.cwd for inv in claude.invocations] == [wt(root, "w2").resolve()]
     assert (wt(root, "w2") / "marca.txt").exists() and not (wt(root, "w1") / "marca.txt").exists()
     assert sh_git(root, "log", "-1", "--format=%s", "coclody/w2").startswith("coclody(w2)")
@@ -159,7 +165,7 @@ def test_invocation_is_scoped_and_env_has_no_secrets(env, monkeypatch, app_paths
         monkeypatch.setenv(name, value)
     services, claude = build('worker_commands = ["pytest", "npm test"]\n')
     queue(conn, "t", "w1")
-    app_module.run_worker_once(services, "w1")
+    run_once(services, "w1")
     (inv,) = claude.invocations
     argv = list(inv.argv)
     allowed = argv[argv.index("--allowedTools") + 1].split(",")
@@ -182,7 +188,7 @@ def test_without_worker_commands_there_is_no_bash(env):
     build, root, conn = env
     services, claude = build()
     queue(conn, "t", "w1")
-    app_module.run_worker_once(services, "w1")
+    run_once(services, "w1")
     argv = list(claude.invocations[0].argv)
     assert "Bash" not in argv[argv.index("--tools") + 1]
     assert "No podés correr comandos" in claude.invocations[0].stdin.decode()
@@ -197,7 +203,7 @@ def test_big_change_is_flagged_in_the_notification(env):
 
     services, _ = build("big_change_files = 2\n", action=many)
     queue(conn, "Muchos archivos", "w1")
-    app_module.run_worker_once(services, "w1")
+    run_once(services, "w1")
     assert conn.execute("SELECT files, insertions, big_change FROM task_commits").fetchone()[:] == (3, 6, 1)
     from tests.fake_telegram import TOKEN, FakeTelegram
     from telegram import Bot
@@ -225,7 +231,7 @@ def test_repo_hooks_never_run_on_coclody_commits(env, tmp_path):
     sh_git(root, "config", "core.hooksPath", str(hooks))
     services, _ = build(action=write_file("x.txt"))
     queue(conn, "t", "w1")
-    assert app_module.run_worker_once(services, "w1").status == "done"
+    assert run_once(services, "w1").status == "done"
     assert not marker.exists()
 
 
@@ -252,7 +258,7 @@ def violation(env, action, title="rebelde"):
     build, root, conn = env
     services, claude = build(action=action)
     task = queue(conn, title, "w1")
-    final = app_module.run_worker_once(services, "w1")
+    final = run_once(services, "w1")
     project = prepo.active_project(conn)
     events = [e.message for e in repo.list_events(conn, task.id)]
     return services, final, prepo.get_worker(conn, project.id, "w1").state, events, root, conn
@@ -268,7 +274,7 @@ def test_worker_that_commits_by_itself_is_stopped(env):
     assert final.status == "failed" and state == "error"
     assert any("HEAD del worktree cambió por fuera de CoClody" in e for e in events)
     queue(conn, "otra", "w1")
-    assert app_module.run_worker_once(services, "w1") is None  # el worker no toma más tareas
+    assert run_once(services, "w1") is None  # el worker no toma más tareas
 
 
 def test_moving_main_is_detected(env):
@@ -308,7 +314,7 @@ def test_worktree_on_wrong_branch_never_runs_claude(env):
     services, claude = build()
     sh_git(wt(root, "w1"), "checkout", "-q", "-b", "desvio")
     task = queue(conn, "t", "w1")
-    final = app_module.run_worker_once(services, "w1")
+    final = run_once(services, "w1")
     assert final.status == "failed" and claude.invocations == []
     assert prepo.get_worker(conn, prepo.active_project(conn).id, "w1").state == "error"
     assert any("antes de empezar" in e.message for e in repo.list_events(conn, task.id))
@@ -459,7 +465,7 @@ def test_two_workers_in_parallel_do_not_trip_each_other(env):
     results = {}
 
     def run(name):
-        results[name] = app_module.run_worker_once(services, name)
+        results[name] = run_once(services, name)
 
     threads = [threading.Thread(target=run, args=(n,)) for n in ("w1", "w2")]
     for t in threads:
@@ -472,3 +478,135 @@ def test_two_workers_in_parallel_do_not_trip_each_other(env):
     states = {w.name: w.state for w in prepo.list_workers(conn, prepo.active_project(conn).id)}
     assert states == {"w1": "idle", "w2": "idle", "w3": "idle"}
     assert conn.execute("SELECT count(*) FROM task_commits").fetchone()[0] == 2
+
+
+# --- límite de uso, tope de reintentos, identidad y /worker ----------------------------------------------
+
+
+def usage(text="Claude usage limit reached"):
+    return ClaudeResult(status="usage_limited", exit_code=1, session_id=None, result_text=text, summary=text,
+                        stdout_truncated=False, duration_s=0.1)
+
+
+def test_usage_limit_requeues_and_flags_without_failing(env):
+    build, root, conn = env
+    services, claude = build()
+    claude.action = lambda cwd: None
+    # El runner devuelve usage_limited.
+    services.worker.runner = lambda inv, cancel: usage()
+    queue(conn, "t", "w1")
+    task, hit = app_module.run_worker_once(services, "w1")
+    assert hit is True and task.status == "queued"  # vuelve a la cola, no falla
+    assert repo.count_runs(conn, 1) == 1
+    # El worker no quedó detenido (no es su culpa).
+    assert prepo.get_worker(conn, prepo.active_project(conn).id, "w1").state == "idle"
+
+
+def test_usage_limit_gives_up_after_max_runs(env):
+    build, root, conn = env
+    services, _ = build("max_task_runs = 2\n")
+    services.worker.runner = lambda inv, cancel: usage()
+    queue(conn, "t", "w1")
+    first, _ = app_module.run_worker_once(services, "w1")
+    assert first.status == "queued"
+    second, _ = app_module.run_worker_once(services, "w1")
+    assert second.status == "failed"  # a la segunda ejecución llega al tope
+    assert any("No se reintenta" in e.message for e in repo.list_events(conn, 1))
+
+
+def test_pool_loop_pauses_and_resumes_on_usage_limit(env, monkeypatch):
+    import asyncio
+
+    from tests.fake_telegram import TOKEN, FakeTelegram
+
+    build, root, conn = env
+    services, _ = build()
+    services.worker.runner = lambda inv, cancel: usage()
+    monkeypatch.setattr(app_module, "WORKER_IDLE_S", 0.02)
+    monkeypatch.setattr(app_module, "USAGE_COOLDOWN_S", 0.3)
+    queue(conn, "t", "w1")
+    fake = FakeTelegram()
+    app = app_module.build_application(TOKEN, services, request=fake, get_updates_request=FakeTelegram())
+
+    async def go():
+        await app.initialize()
+        await app_module._post_init(app)
+        # Espera a que la cola se pause y llegue el aviso.
+        for _ in range(200):
+            if services.usage_paused_at is not None and fake.sent():
+                break
+            await asyncio.sleep(0.02)
+        paused = services.usage_paused_at is not None
+        # Tras el enfriamiento, se reanuda sola.
+        for _ in range(100):
+            if services.usage_paused_at is None:
+                break
+            await asyncio.sleep(0.02)
+        resumed = services.usage_paused_at is None
+        await app_module._stop_services(app)
+        await app.shutdown()
+        return paused, resumed, [m["text"] for m in fake.sent()]
+
+    paused, resumed, texts = asyncio.run(go())
+    assert paused and resumed
+    assert any("límite de uso" in t for t in texts)
+
+
+def test_check_flags_missing_git_identity(env, monkeypatch, app_paths):
+    from coclody import cli
+    from tests.test_cli import run_check
+
+    from coclody.orchestrator import gitops
+
+    build, root, conn = env
+    services, _ = build()
+    sh_git(root, "config", "--unset", "user.name")
+    sh_git(root, "config", "--unset", "user.email")
+    # Que git no lea una identidad global del sistema donde corren los tests (en CI Windows no hay).
+    home = app_paths.data_dir / "sin-identidad"
+    home.mkdir()
+    empty = home / "gitconfig"
+
+    def no_global_env():
+        e = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+        e.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(empty), "HOME": str(home)})
+        return e
+
+    monkeypatch.setattr(gitops, "git_env", no_global_env)
+
+    class Store:
+        def get(self, name):
+            return "123:abc"
+
+    monkeypatch.setattr(cli, "resolve_executable", lambda *a: root)
+    code, text = run_check(app_paths, Store())
+    assert "git no tiene user.name" in text and code == 2
+
+
+def test_worker_command_lists_and_resumes(env):
+    from tests.fake_telegram import user_text
+
+    build, root, conn = env
+    services, _ = build()
+    project = prepo.active_project(conn)
+    prepo.set_worker_state(conn, project.id, "w2", "error")
+    ((listed,),) = telegram(services, lambda f: user_text(ME, "/worker"))
+    assert "🟢 w1: libre" in listed["text"] and "🛑 w2: detenido" in listed["text"] and "reanuda" in listed["text"]
+    ((resumed,),) = telegram(services, lambda f: user_text(ME, "/worker w2 reanudar"))
+    assert resumed["text"] == "Reanudé el worker w2: vuelve a tomar tareas."
+    assert prepo.get_worker(conn, project.id, "w2").state == "idle"
+    ((again,),) = telegram(services, lambda f: user_text(ME, "/worker w2 reanudar"))
+    assert "no está detenido" in again["text"]
+    ((missing,),) = telegram(services, lambda f: user_text(ME, "/worker w9 reanudar"))
+    assert "No existe el worker" in missing["text"]
+
+
+def test_stopped_worker_is_skipped_until_resumed(env):
+    build, root, conn = env
+    services, claude = build(action=write_file("x.txt"))
+    project = prepo.active_project(conn)
+    prepo.set_worker_state(conn, project.id, "w1", "error")
+    queue(conn, "t", "w1")
+    assert run_once(services, "w1") is None  # detenido: no toma la tarea
+    prepo.set_worker_state(conn, project.id, "w1", "idle")
+    assert run_once(services, "w1").status == "done"
