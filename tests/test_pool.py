@@ -218,7 +218,7 @@ def test_big_change_is_flagged_in_the_notification(env):
 
     asyncio.run(go())
     (msg,) = fake.sent()
-    assert "en coclody/w1: 3 archivo(s), +6 −0" in msg["text"] and "⚠️ Cambio grande" in msg["text"]
+    assert "3 arch +6 −0" in msg["text"] and "⚠️ cambio grande" in msg["text"]
 
 
 @posix_only
@@ -338,7 +338,10 @@ def test_failed_notification_explains_the_violation(env):
 
     asyncio.run(go())
     (msg,) = fake.sent()
-    assert "falló" in msg["text"] and "Invariante de git violada en w1" in msg["text"]
+    assert "falló" in msg["text"]  # una línea; el detalle (la invariante) va detrás de Detalle y en el evento
+    with services.db() as c:
+        t = repo.list_tasks(c)[0]
+        assert any("Invariante de git violada en w1" in e.message for e in repo.list_events(c, t.id))
 
 
 def test_restart_resets_worker_state(env):
@@ -670,7 +673,7 @@ def test_telegram_approval_flow(env, monkeypatch):
         idx, approval_msg = next((i, m) for i, m in enumerate(fake.sent()) if inline_data(m)
                                  and inline_data(m)[0].startswith("ba:"))
         data = inline_data(approval_msg)
-        assert len(data) == 2 and data[0].startswith("ba:a:")
+        assert len(data) == 3 and data[0].startswith("ba:a:") and data[2].startswith("ba:c:")
         msg = bot_message_with_buttons(fake.returned_ids[idx], ME, approval_msg)
         before = len(fake.sent())
         await app.process_update(Update.de_json(callback_update(ME, data[0], message=msg), app.bot))

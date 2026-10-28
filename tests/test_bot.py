@@ -305,8 +305,8 @@ def test_notifies_done_and_failed_with_summary(conn, db):
     fake = FakeTelegram()
     assert notify(db, fake) == 2
     first, second = fake.sent()
-    assert first["chat_id"] == ME and "✅ Tarea #1 terminada: uno" in first["text"] and "Hice uno." in first["text"]
-    assert second["chat_id"] == BRO and "❌ Tarea #2 falló: dos" in second["text"] and "Se rompió dos." in second["text"]
+    assert first["chat_id"] == ME and "✅ #1 uno · terminada" in first["text"]  # el resumen va detrás de Detalle
+    assert second["chat_id"] == BRO and "❌ #2 dos · falló" in second["text"]
     assert repo.pending_notifications(conn) == []
     assert notify(db, FakeTelegram()) == 0
     assert a.status == "done" and b.status == "failed"

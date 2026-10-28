@@ -85,6 +85,7 @@ from coclody.telegram_bot.keyboards import (
     AssignAction,
     ContextAction,
     TaskAction,
+    TaskDetailAction,
     context_buttons,
     parse_callback,
     task_buttons,
@@ -389,11 +390,22 @@ async def _on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         services: Services = context.bot_data["services"]
         from coclody.brain import service as brain_service
 
+        if action.choice == "why":  # ℹ Contexto: muestra el porqué, no resuelve ni saca los botones
+            detail = await asyncio.to_thread(brain_service.decision_detail, services.db, action.decision_id)
+            await query.answer()
+            await context.bot.send_message(chat_id=chat_id, text=outgoing(detail), reply_markup=MAIN_KEYBOARD)
+            return
         text, bq_id = await asyncio.to_thread(
-            brain_service.approve_decision, services.db, services.config, action.decision_id, action.approve, chat_id)
+            brain_service.approve_decision, services.db, services.config, action.decision_id,
+            action.choice == "approve", chat_id)
         remove_buttons = True
         if bq_id:  # la decisión aprobada era un "ask": mando la pregunta del cerebro
             await deliver_brain_question(context.application, services, bq_id)
+    elif isinstance(action, TaskDetailAction):
+        text = await asyncio.to_thread(_task_detail, context.bot_data["services"], action.task_id)
+        await query.answer()
+        await context.bot.send_message(chat_id=chat_id, text=outgoing(text), reply_markup=MAIN_KEYBOARD)
+        return
     else:
         text, remove_buttons = await asyncio.to_thread(
             c.answer_button, chat_id, query.message.message_id, action.question_id, action.answer
@@ -519,12 +531,19 @@ async def trigger_brain(app: Application, services: Services, trigger: str, *, t
     if outcome is None:
         return "No hay proyecto activo. Elegí uno con /proyecto <nombre>."
 
-    for decision_id, decision in outcome.pending:  # freno de mano: cada decisión a aprobar
-        text = f"🧠 El cerebro propone (decisión #{decision_id}):\n{brain_service.describe(decision)}\n\nporque: {decision.reason}"
-        await _deliver_approval(app, services, decision_id, text)
+    for decision_id, decision in outcome.pending:  # freno de mano: cada decisión en una línea
+        await _deliver_approval(app, services, decision_id, f"🧠 {brain_service.describe(decision)}")
     for bq_id in outcome.brain_question_ids:       # preguntas que el cerebro generó (autónomo)
         await deliver_brain_question(app, services, bq_id)
-    return outcome.plan
+    # Respuesta a /cerebro: en simulacro, el plan (no se mandó nada aparte); si no, una línea (las
+    # propuestas ya fueron cada una por su lado; no repito el resumen).
+    if outcome.mode == "dry_run":
+        return outcome.plan
+    if outcome.pending:
+        return f"🧠 {len(outcome.pending)} decisión/es; te las mandé para aprobar."
+    if outcome.mode == "autonomous" and outcome.decisions:
+        return outcome.plan
+    return "🧠 Sin propuestas por ahora."
 
 
 async def _deliver_approval(app: Application, services: Services, decision_id: int, text: str) -> None:
@@ -562,6 +581,19 @@ async def deliver_brain_question(app: Application, services: Services, question_
             await asyncio.to_thread(_record_bq_delivery, services, question_id, chat_id, sent.message_id)
         except Exception as exc:
             log.warning("No se pudo enviar la pregunta del cerebro #%s al chat %s: %s", question_id, chat_id, exc)
+
+
+def _task_detail(services: Services, task_id: int) -> str:
+    """Resumen completo de una tarea terminada (detrás del botón Detalle)."""
+    from coclody.db import repo
+
+    with services.db() as conn:
+        task = repo.get_task(conn, task_id)
+        if task is None:
+            return f"No existe la tarea #{task_id}."
+        runs = repo.list_runs(conn, task_id)
+    summary = runs[-1].summary if runs and runs[-1].summary else "(sin resumen)"
+    return f"#{task.id} {task.title}\n{summary}"
 
 
 def _record_bq_delivery(services: Services, question_id: int, chat_id: int, message_id: int) -> None:
@@ -824,15 +856,13 @@ async def _run_brain_collecting(app: Application, services: Services, trigger: s
         paths.git_hooks_dir, paths.git_empty_config, trigger, event_ids)
     if outcome is None:
         return None
-    for decision_id, decision in outcome.pending:
-        text = (f"🧠 El cerebro propone (decisión #{decision_id}):\n{brain_service.describe(decision)}"
-                f"\n\nporque: {decision.reason}")
-        await _deliver_approval(app, services, decision_id, text)
+    for decision_id, decision in outcome.pending:  # una línea por decisión, el porqué detrás del botón
+        await _deliver_approval(app, services, decision_id, f"🧠 {brain_service.describe(decision)}")
     for bq_id in outcome.brain_question_ids:
         await deliver_brain_question(app, services, bq_id)
-    if outcome.parse_status == "ok" and services.config.orchestrator.brain_dry_run:
-        await _notify_all(app, services, outcome.plan)  # en simulacro, te muestro lo que haría
-    elif outcome.mode == "autonomous":
+    # En simulacro te muestro lo que haría (no se mandó nada aparte). En autónomo, el resultado.
+    # En aprobación no mando resumen: ya fue cada decisión por su lado.
+    if outcome.parse_status == "ok" and (services.config.orchestrator.brain_dry_run or outcome.mode == "autonomous"):
         await _notify_all(app, services, outcome.plan)
     return outcome
 

@@ -306,6 +306,8 @@ Hay tres modos, por config:
 - **Freno de mano** (`brain_dry_run = false`, `brain_approval = true`): la primera vez que ejecuta de verdad. Cada decisión te llega por Telegram con botones **✓ Aprobar / ✗ Rechazar**, y se ejecuta recién cuando la aprobás. Nada se ejecuta sin tu visto bueno.
 - **Autónomo** (`brain_approval = false`): cada decisión se ejecuta en el momento. Activalo recién cuando confíes.
 
+Los mensajes van al grano: cada propuesta y cada aviso de tarea ocupan **una línea**, con el detalle (el porqué de una decisión, el resumen de una tarea) detrás de un botón (**ℹ Contexto**, **Detalle**). Si el cerebro te hizo una pregunta y todavía no respondiste, no decide ni encola trabajo que dependa de esa respuesta: la ve pendiente y espera.
+
 Lo que una decisión puede hacer al ejecutarse: encolar una tarea para un worker (respetando los topes de cola y de tareas autónomas por día), responderle una pregunta a un worker, proponerte un borrador de contexto (que seguís aprobando vos), o preguntarte algo (te llega como pregunta del cerebro, respondés con reply). Nunca más que eso: el esquema cerrado no puede expresar un comando, una ruta ni un cambio de configuración. Cada corrida y cada decisión quedan en la auditoría.
 
 ### Qué está garantizado y cómo

@@ -64,12 +64,15 @@ def gather_inputs(conn, config: Config, project: prepo.Project, trigger: str) ->
             summaries.append((f"tarea #{t.id} ({t.worker or '—'}, {t.status})", runs[-1].summary))
             summary_run_ids.append(runs[-1].id)
 
+    pending_asks = [q.question for q in repo.list_open_brain_questions(conn, project.id)]
+
     inputs = BrainInputs(
         workers=workers,
         rules_text="\n".join(f"- {r.text}" for r in rules),
         context_text="\n".join(f"- {c.text}" for c in contexts),
         events=[trigger],
         questions=open_q,
+        pending_asks=pending_asks,
         summaries=summaries,
         queue=queue,
         input_ids={"rules": [r.id for r in rules], "context": [c.id for c in contexts], "questions": q_ids,
@@ -202,6 +205,36 @@ def _plan_applied(run_id: int, applied: list[tuple[Decision, executor.Executed]]
         mark = "✓" if done.ok else "⚠️"
         lines.append(f"{mark} {done.detail}\n   porque: {d.reason}")
     return "\n".join(lines)
+
+
+def decision_detail(db: DbFactory, decision_id: int) -> str:
+    """El porqué (y el contexto) de una decisión, para el botón ℹ Contexto."""
+    with db() as conn:
+        row = repo.get_brain_decision(conn, decision_id)
+    if row is None:
+        return "No encuentro esa decisión."
+    payload = json.loads(row.payload)
+    lines = [describe_payload(payload)]
+    if payload.get("reason"):
+        lines.append(f"Porque: {payload['reason']}")
+    if payload.get("based_on"):
+        lines.append(f"Se basa en: {payload['based_on']}")
+    if payload.get("description"):
+        lines.append(f"Detalle de la tarea: {payload['description']}")
+    return "\n".join(lines)
+
+
+def describe_payload(payload: dict) -> str:
+    action = payload.get("action")
+    if action == "enqueue":
+        return f"Encolar para {payload.get('worker')}: «{payload.get('title')}»"
+    if action == "ask":
+        return f"Preguntarte: {payload.get('question')}"
+    if action == "answer_worker_question":
+        return f"Responder la pregunta #{payload.get('question_id')}: {payload.get('answer')}"
+    if action == "propose_context":
+        return f"Proponer contexto: {payload.get('text')}"
+    return "Esperar"
 
 
 def describe(d: Decision) -> str:

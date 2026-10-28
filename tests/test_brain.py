@@ -87,7 +87,7 @@ def test_schema_cannot_express_dangerous_things():
 
 def _inputs(**kw):
     base = dict(workers=["w1", "w2"], rules_text="- regla A", context_text="- contexto B",
-                events=["arrancó w1"], questions=["#3 (tarea #3, w1): ¿sigo?"],
+                events=["arrancó w1"], questions=["#3 (tarea #3, w1): ¿sigo?"], pending_asks=[],
                 summaries=[("tarea #2 (w2, done)", "hice X")], queue=["#1 [w1] queued: algo"], input_ids={})
     base.update(kw)
     return BrainInputs(**base)
@@ -397,3 +397,38 @@ def test_autonomous_daily_cap(setup, monkeypatch):
     assert repo.list_brain_decisions(conn, first.run_id)[0].status == "executed"
     second = brain_service.run_once(db, config, None, paths.brain_dir, paths.git_hooks_dir, paths.git_empty_config, "y")
     assert repo.list_brain_decisions(conn, second.run_id)[0].status == "rejected"  # llegó al tope del día
+
+
+# --- formato: una línea por defecto, detalle detrás de un botón ------------------------------------------
+
+
+def test_decision_detail_shows_reason_behind_button(setup, monkeypatch):
+    db, config, conn, pid, _ = setup
+    text = resp({"action": "enqueue", "worker": "w1", "title": "Hacer X", "description": "editar calc.py",
+                 "based_on": "resumen #2", "reason": "lo pidió el contexto"})
+    outcome, config = run_mode(setup, text, monkeypatch, dry_run=False, approval=True)
+    (decision_id, decision) = outcome.pending[0]
+    # describe() es una línea, sin el porqué.
+    one_line = brain_service.describe(decision)
+    assert one_line == "Encolar para w1: «Hacer X»" and "porque" not in one_line
+    # El detalle (botón ℹ Contexto) trae el porqué y el contexto.
+    detail = brain_service.decision_detail(db, decision_id)
+    assert "lo pidió el contexto" in detail and "resumen #2" in detail and "editar calc.py" in detail
+
+
+def test_brain_sees_its_own_pending_questions(setup, monkeypatch):
+    db, config, conn, pid, _ = setup
+    repo.add_brain_question(conn, pid, "¿qué hago con la división por cero?", kind="open")
+    captured = {}
+
+    def capture(claude, prompt, bd, hd, ec):
+        captured["prompt"] = prompt
+        return ClaudeResult(status="ok", exit_code=0, session_id=None,
+                            result_text=resp({"action": "wait", "reason": "espero tu respuesta"}),
+                            summary="x", stdout_truncated=False, duration_s=0.1)
+
+    monkeypatch.setattr(brain_service, "run_brain", capture)
+    brain_service.run_once(db, config, None, setup[4].brain_dir, setup[4].git_hooks_dir,
+                           setup[4].git_empty_config, "x")
+    assert "división por cero" in captured["prompt"]
+    assert "TODAVÍA NO te respondió" in captured["prompt"]  # y la instrucción de no decidir sobre eso

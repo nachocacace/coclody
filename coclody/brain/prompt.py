@@ -54,6 +54,7 @@ class BrainInputs:
     context_text: str
     events: list[str]                                   # qué lo despertó
     questions: list[str]                                # preguntas de workers pendientes (id + texto)
+    pending_asks: list[str]                             # preguntas TUYAS a la persona, todavía sin responder
     summaries: list[tuple[str, str]]                    # (etiqueta, resumen), del más nuevo al más viejo
     queue: list[str]                                    # líneas de la cola
     # ids de lo que entró, para la auditoría (reconstrucción)
@@ -79,6 +80,10 @@ def build_prompt(inputs: BrainInputs, budget: int) -> BuiltPrompt:
     if inputs.questions:
         fixed.append("Preguntas de workers pendientes (el #N es el question_id para answer_worker_question):\n"
                      + "\n".join(f"- {q}" for q in inputs.questions))
+    if inputs.pending_asks:
+        fixed.append("Ya le preguntaste esto a la persona y TODAVÍA NO te respondió. No decidas ni encoles "
+                     "trabajo que dependa de estas respuestas; esperá (wait) o avanzá con otra cosa que no dependa:\n"
+                     + "\n".join(f"- {q}" for q in inputs.pending_asks))
 
     base = "\n\n".join(fixed)
     remaining = max(0, budget - len(base) - 200)  # margen para los envoltorios y la cola

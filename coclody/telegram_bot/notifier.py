@@ -31,7 +31,9 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 from coclody.db import DbFactory, repo
 from coclody.db.repo import Question, Run, Task, TaskCommit, TaskEvent
 from coclody.telegram_bot.commands import STATUS_EMOJI, clip, no_autolink, outgoing, task_title
-from coclody.telegram_bot.keyboards import MAIN_KEYBOARD, question_buttons, task_buttons
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+from coclody.telegram_bot.keyboards import MAIN_KEYBOARD, question_buttons
 
 log = logging.getLogger(__name__)
 
@@ -48,28 +50,23 @@ class _Pending:
 
 
 def format_done(task: Task, run: Run | None, commit: TaskCommit | None = None) -> str:
-    return clip(
-        f"{STATUS_EMOJI['done']} Tarea #{task.id} terminada: {task_title(task)}{_commit(commit)}\n\n{_summary(run)}"
-    )
+    """Una línea: título, estado y commit. El resumen va detrás del botón Detalle."""
+    return clip(f"{STATUS_EMOJI['done']} #{task.id} {task_title(task)} · terminada{_commit(commit)}")
 
 
 def format_failed(task: Task, run: Run | None, commit: TaskCommit | None = None) -> str:
-    return clip(
-        f"{STATUS_EMOJI['failed']} Tarea #{task.id} falló: {task_title(task)}{_commit(commit)}\n\n{_summary(run)}"
-        f"\n\nDetalle: /estado {task.id}"
-    )
+    return clip(f"{STATUS_EMOJI['failed']} #{task.id} {task_title(task)} · falló{_commit(commit)}")
 
 
 def _commit(commit: TaskCommit | None) -> str:
-    """Línea del commit que hizo CoClody (orquestador), con aviso si es un cambio grande."""
+    """Resumen compacto del commit en la misma línea, con aviso si es grande o toca archivos sensibles."""
     if commit is None:
         return ""
-    line = (f"\nCommit {commit.head_sha[:10]} en coclody/{commit.worker}: {commit.files} archivo(s), "
-            f"+{commit.insertions} −{commit.deletions}")
+    line = f" · {commit.files} arch +{commit.insertions} −{commit.deletions}"
     if commit.big_change:
-        line += "\n⚠️ Cambio grande: revisalo con cuidado antes de mergear."
+        line += " · ⚠️ cambio grande"
     if commit.sensitive_list:
-        line += "\n⚠️ Tocó archivos sensibles (" + ", ".join(commit.sensitive_list) + "): revisalos antes de mergear."
+        line += " · ⚠️ sensible: " + ", ".join(commit.sensitive_list)
     return line
 
 
@@ -101,15 +98,23 @@ async def flush_notifications(bot: Bot, db: DbFactory, allowed_chat_ids: Iterabl
     return processed
 
 
+def _detail_markup(task_id: int, retry: bool = False) -> InlineKeyboardMarkup:
+    """Botón Detalle (resumen completo) y, en los fallos, Reintentar."""
+    row = [InlineKeyboardButton("Detalle", callback_data=f"td:{task_id}")]
+    if retry:
+        row.append(InlineKeyboardButton("↻ Reintentar", callback_data=f"t:r:{task_id}"))
+    return InlineKeyboardMarkup([row])
+
+
 async def _deliver(bot: Bot, db: DbFactory, item: _Pending, recipients: list[int]) -> None:
     """Envía las partes que falten. Un error transitorio se propaga (corta la tanda)."""
     if item.new_status == "waiting_input":
         parts = [(q.id, format_question(item.task, q), question_buttons(q)) for q in item.questions]
     elif item.new_status == "done":
-        parts = [(0, format_done(item.task, item.last_run, item.commit), None)]
+        parts = [(0, format_done(item.task, item.last_run, item.commit), _detail_markup(item.task.id))]
     elif item.new_status == "failed":
-        retry = task_buttons([(item.task.id, "retry")]) if item.task.status == "failed" else None
-        parts = [(0, format_failed(item.task, item.last_run, item.commit), retry)]
+        parts = [(0, format_failed(item.task, item.last_run, item.commit),
+                  _detail_markup(item.task.id, retry=item.task.status == "failed"))]
     else:
         return
     for part, text, markup in parts:
@@ -148,9 +153,3 @@ def _mark(db: DbFactory, event_id: int) -> None:
 def _record(db: DbFactory, event_id: int, chat_id: int, part: int, status: str, message_id: int | None) -> None:
     with db() as conn:
         repo.record_delivery(conn, event_id, chat_id, part, status, message_id)
-
-
-def _summary(run: Run | None) -> str:
-    if run is None or not run.summary:
-        return "(sin resumen)"
-    return no_autolink(clip(run.summary, 3500))

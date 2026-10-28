@@ -103,7 +103,7 @@ def assert_cleaned_up(services, claude, conn, api):
     task = repo.get_task(conn, 1)
     assert task.status == "failed"
     assert "Interrumpida al cerrar CoClody." in [e.message for e in repo.list_events(conn, 1)]
-    assert any("❌ Tarea #1 falló" in m["text"] for m in api.sent())  # el aviso pendiente salió
+    assert any("❌ #1" in m["text"] and "falló" in m["text"] for m in api.sent())  # el aviso pendiente salió
     assert services.background and all(t.done() and not t.cancelled() for t in services.background)
 
 

@@ -268,7 +268,7 @@ def test_failed_notification_has_retry_button(env):
         await env.app.initialize()
         await flush_notifications(env.app.bot, env.db, {ME})
         (params,) = env.fake.sent()
-        assert inline_data(params) == [f"t:r:{t.id}"]
+        assert inline_data(params) == [f"td:{t.id}", f"t:r:{t.id}"]  # Detalle + Reintentar
         message = bot_message_with_buttons(env.fake.returned_ids[-1], ME, params)
         calls = await env.process(callback_update(ME, f"t:r:{t.id}", message=message))
         await env.app.shutdown()

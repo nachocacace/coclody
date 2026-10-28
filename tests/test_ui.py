@@ -159,10 +159,10 @@ def test_messages_with_inline_buttons_keep_them(env):
         return created + fake.sent()[-1:]
 
     created, failed = run(scenario())
-    assert inline_data(created) == ["t:c:2"] and inline_data(failed) == ["t:r:1"]
+    assert inline_data(created) == ["t:c:2"] and inline_data(failed) == ["td:1", "t:r:1"]
 
 
-def test_done_notification_carries_the_main_keyboard(env):
+def test_done_notification_is_one_line_with_a_detail_button(env):
     _, db, conn, fake, app = env
     finished(conn, "lista", "done")
 
@@ -173,7 +173,8 @@ def test_done_notification_carries_the_main_keyboard(env):
 
     run(scenario())
     (params,) = fake.sent()
-    assert is_main_keyboard(params)
+    assert params["text"] == "✅ #1 lista · terminada"  # una línea, sin el resumen
+    assert inline_data(params) == ["td:1"]  # el resumen va detrás del botón Detalle
 
 
 # --- 2. emojis de estado -------------------------------------------------------------------------------
