@@ -58,7 +58,9 @@ class FakeClaude:
 
 
 @pytest.fixture
-def env(app_paths, conn, tmp_path):
+def env(app_paths, conn, tmp_path, monkeypatch):
+    # worker_commands se acepta corra donde corra el CI (el gate sin sandbox tiene su propio test).
+    monkeypatch.setattr("coclody.config._sandbox_platform", lambda: True)
     ws = (tmp_path / "ws")
     ws.mkdir()
     ws = ws.resolve()

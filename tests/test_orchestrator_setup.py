@@ -52,7 +52,11 @@ def git(app_paths):
 
 
 @pytest.fixture
-def cfg(app_paths, ws):
+def cfg(app_paths, ws, monkeypatch):
+    # Estos tests arman configs que pueden traer worker_commands; que se acepten corra donde corra el CI
+    # (el rechazo sin sandbox lo cubre test_hardening.test_worker_commands_rejected_without_sandbox).
+    monkeypatch.setattr("coclody.config._sandbox_platform", lambda: True)
+
     def write(extra: str = "enabled = true\n") -> object:
         app_paths.config_file.write_text(
             f'[telegram]\nallowed_chat_ids = [111]\n\n[claude]\nworkspace_root = "{toml_path(ws)}"\n\n'
