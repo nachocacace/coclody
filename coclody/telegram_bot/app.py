@@ -82,7 +82,9 @@ from coclody.telegram_bot.keyboards import (
     MAIN_KEYBOARD,
     NEW_TASK_PROMPT,
     AssignAction,
+    ContextAction,
     TaskAction,
+    context_buttons,
     parse_callback,
     task_buttons,
     worker_buttons,
@@ -183,6 +185,23 @@ def build_application(
         task_id = parse_task_id(_args(update))
         return Reply(c.status(_args(update)), task_buttons(c.task_actions(task_id)) if task_id else None)
 
+    def only_orch(fn):
+        return fn if services.config.orchestrator.enabled else (lambda u: ORCHESTRATOR_OFF)
+
+    async def context_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/contexto: responde el listado y, aparte, cada borrador con botones de aprobar/rechazar."""
+        if not services.config.orchestrator.enabled:
+            await update.effective_message.reply_text(ORCHESTRATOR_OFF, reply_markup=MAIN_KEYBOARD)
+            raise ApplicationHandlerStop
+        chat_id = update.effective_chat.id
+        text = await asyncio.to_thread(c.context, chat_id, _args(update))
+        await update.effective_message.reply_text(outgoing(text), reply_markup=MAIN_KEYBOARD)
+        if not _args(update):  # solo al listar: ofrecé cada borrador pendiente con sus botones
+            for draft in await asyncio.to_thread(c.pending_context_drafts, chat_id):
+                body = f"Borrador de contexto #{draft.id} (propuesto por el cerebro):\n\n{draft.text}"
+                await context_bot_message(ctx, chat_id, body, context_buttons(draft.id))
+        raise ApplicationHandlerStop
+
     for names, fn in (
         (("start", "ayuda"), help_),
         (("lista",), list_),
@@ -193,9 +212,11 @@ def build_application(
         (("reintentar",), lambda u: c.retry(_args(u))),
         (("proyectos",), lambda u: list_projects(services)),
         (("proyecto",), lambda u: switch_project(services, _args(u))),
-        (("worker",), lambda u: c.workers(_args(u)) if services.config.orchestrator.enabled else ORCHESTRATOR_OFF),
+        (("worker",), only_orch(lambda u: c.workers(_args(u)))),
+        (("reglas",), only_orch(lambda u: c.rules(_args(u)))),
     ):
         app.add_handler(CommandHandler(list(names), _reply_with(fn), filters=only_new))
+    app.add_handler(CommandHandler("contexto", context_cmd, filters=only_new))
 
     def on_text(update: Update) -> str | Reply:
         message, chat_id = update.effective_message, update.effective_chat.id
@@ -324,6 +345,10 @@ def _reply_with(fn):
     return handler
 
 
+async def context_bot_message(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, markup) -> None:
+    await ctx.bot.send_message(chat_id=chat_id, text=outgoing(text), reply_markup=markup)
+
+
 async def _on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Un botón inline. El guard ya validó el chat y el usuario; el dato se valida acá."""
     c: Commands = context.bot_data["services"].commands
@@ -339,6 +364,8 @@ async def _on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     elif isinstance(action, AssignAction):
         text = await asyncio.to_thread(c.assign, action.task_id, action.worker)
         remove_buttons = text.startswith("La tarea")  # asignada: los otros botones ya no sirven
+    elif isinstance(action, ContextAction):
+        text, remove_buttons = await asyncio.to_thread(c.decide_context, action.context_id, action.approve, chat_id)
     else:
         text, remove_buttons = await asyncio.to_thread(
             c.answer_button, chat_id, query.message.message_id, action.question_id, action.answer

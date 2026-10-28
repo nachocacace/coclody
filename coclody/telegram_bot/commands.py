@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import re
 
-from coclody.db import DbFactory, repo
+from coclody.db import DbFactory, knowledge, repo
 from coclody.db import projects as prepo
-from coclody.db.repo import InvalidTransitionError, Question, RepoError, Task
+from coclody.db.repo import InvalidTransitionError, Question, RepoError, Task, ValidationError
 from coclody.orchestrator.worker import CANCEL_USER, CancelRegistry
 
 TELEGRAM_MAX_CHARS = 4096
@@ -227,6 +227,85 @@ class Commands:
     def _worker_emoji(state: str) -> str:
         return {"idle": "🟢", "running": "⚙️", "paused": "⏸️", "error": "🛑"}.get(state, "•")
 
+    def rules(self, arg: str = "") -> str:
+        """``/reglas`` lista; ``/reglas agregar <texto>`` | ``quitar <id>`` | ``on|off <id>``."""
+        verb, _, rest = arg.strip().partition(" ")
+        verb, rest = verb.lower(), rest.strip()
+        with self._db() as conn:
+            project = prepo.active_project(conn)
+            if project is None:
+                return "No hay proyecto activo. Elegí uno con /proyecto <nombre>."
+            try:
+                if verb in ("agregar", "add") and rest:
+                    r = knowledge.add_rule(conn, project.id, rest)
+                    return f"Agregué la regla #{r.id} en {project.name}."
+                if verb in ("quitar", "borrar", "rm") and rest:
+                    return (f"Borré la regla #{rest}." if knowledge.delete_rule(conn, project.id, _rule_id(rest))
+                            else f"No existe la regla #{rest}.")
+                if verb in ("on", "off") and rest:
+                    r = knowledge.set_rule_enabled(conn, project.id, _rule_id(rest), verb == "on")
+                    return f"Regla #{r.id}: {'activada' if r.enabled else 'desactivada'}."
+                if verb:
+                    return "Uso: /reglas · /reglas agregar <texto> · /reglas on|off <id> · /reglas quitar <id>"
+                rows = knowledge.list_rules(conn, project.id)
+            except RepoError as exc:
+                return f"No pude: {exc}"
+        if not rows:
+            return f"{project.name} no tiene reglas. Agregá una con /reglas agregar <texto>."
+        lines = [f"{'🟢' if r.enabled else '⚪'} #{r.id} {no_autolink(clip(r.text, 300))}" for r in rows]
+        return f"Reglas de {project.name}:\n" + "\n".join(lines) + "\n\n(🟢 activa · ⚪ desactivada)"
+
+    def context(self, chat_id: int, arg: str = "") -> str:
+        """``/contexto`` lista aprobado y borradores; ``agregar <texto>`` | ``archivar <id>``."""
+        verb, _, rest = arg.strip().partition(" ")
+        verb, rest = verb.lower(), rest.strip()
+        with self._db() as conn:
+            project = prepo.active_project(conn)
+            if project is None:
+                return "No hay proyecto activo. Elegí uno con /proyecto <nombre>."
+            try:
+                if verb in ("agregar", "add") and rest:
+                    c = knowledge.add_user_context(conn, project.id, rest, chat_id)
+                    return f"Agregué el contexto #{c.id} (aprobado) en {project.name}."
+                if verb in ("archivar", "borrar") and rest:
+                    c = knowledge.archive_context(conn, project.id, _rule_id(rest))
+                    return f"Archivé el contexto #{c.id}."
+                if verb:
+                    return "Uso: /contexto · /contexto agregar <texto> · /contexto archivar <id>"
+                approved = knowledge.list_context(conn, project.id, statuses=("approved",))
+                drafts = knowledge.list_context(conn, project.id, statuses=("draft",))
+            except RepoError as exc:
+                return f"No pude: {exc}"
+        parts = []
+        if approved:
+            parts.append("Aprobado:\n" + "\n".join(f"• #{c.id} {no_autolink(clip(c.text, 300))}" for c in approved))
+        if drafts:
+            parts.append(f"Borradores pendientes: {', '.join(f'#{c.id}' for c in drafts)} "
+                         "(te los muestro con botones para aprobar o rechazar).")
+        if not parts:
+            return f"{project.name} no tiene contexto. Agregá uno con /contexto agregar <texto>."
+        return f"Contexto de {project.name}:\n" + "\n\n".join(parts)
+
+    def pending_context_drafts(self, chat_id: int):
+        """Borradores de contexto pendientes (para ofrecerlos con botones de aprobar/rechazar)."""
+        with self._db() as conn:
+            project = prepo.active_project(conn)
+            if project is None:
+                return []
+            return knowledge.list_context(conn, project.id, statuses=("draft",))
+
+    def decide_context(self, context_id: int, approve: bool, chat_id: int) -> tuple[str, bool]:
+        """Resuelve un borrador desde un botón. Devuelve (texto, sacar botones)."""
+        with self._db() as conn:
+            project = prepo.active_project(conn)
+            if project is None:
+                return "No hay proyecto activo.", True
+            try:
+                c = knowledge.decide_context(conn, project.id, context_id, approve, chat_id)
+            except RepoError as exc:
+                return f"No pude: {exc}", True
+        return (f"Contexto #{c.id} {'aprobado' if approve else 'rechazado'}.", True)
+
     def remember_task_prompt(self, chat_id: int, message_id: int) -> None:
         """Guarda el pedido de título en la base: una respuesta sigue valiendo después de reiniciar."""
         with self._db() as conn:
@@ -389,6 +468,13 @@ class Commands:
             else:
                 return f"Respuesta registrada. La tarea #{task.id} vuelve a la cola."
         return f"Respuesta registrada (la tarea #{task.id} está {label(task.status)})."
+
+
+def _rule_id(raw: str) -> int:
+    value = parse_task_id(raw)
+    if value is None:
+        raise ValidationError(f"id inválido: {raw!r}")
+    return value
 
 
 def _line(task: Task) -> str:

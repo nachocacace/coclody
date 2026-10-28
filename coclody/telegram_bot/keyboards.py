@@ -12,6 +12,7 @@
       t:c:<tarea>          cancelar la tarea
       t:r:<tarea>          reintentar la tarea
       w:<tarea>:<worker>   asignar una tarea pendiente a un worker (orquestador)
+      cx:a|r:<id>          aprobar o rechazar un borrador de contexto
       q:<pregunta>:s|n     responder sí o no a una pregunta de sí/no
 
   El ``callback_data`` lo arma el bot, pero vuelve desde Telegram: se trata
@@ -50,12 +51,15 @@ ORCHESTRATOR_COMMANDS = (
     BotCommand("proyectos", "Listar los proyectos"),
     BotCommand("proyecto", "Cambiar de proyecto: /proyecto <nombre>"),
     BotCommand("worker", "Ver los workers o reanudar uno: /worker <id> reanudar"),
+    BotCommand("reglas", "Ver o editar las reglas del proyecto"),
+    BotCommand("contexto", "Ver el contexto y aprobar borradores"),
 )
 
 YES, NO = "sí", "no"
 _TASK_RE = re.compile(r"t:([cr]):([1-9][0-9]{0,15})")
 _ANSWER_RE = re.compile(r"q:([1-9][0-9]{0,15}):([sn])")
 _ASSIGN_RE = re.compile(r"w:([1-9][0-9]{0,15}):([a-z0-9][a-z0-9-]{0,15})")
+_CONTEXT_RE = re.compile(r"cx:([ar]):([1-9][0-9]{0,15})")
 _ACTION_LABELS = {"cancel": "✖ Cancelar", "retry": "↻ Reintentar"}
 _ACTION_CODES = {"cancel": "c", "retry": "r"}
 
@@ -78,7 +82,13 @@ class AssignAction:
     worker: str
 
 
-def parse_callback(data: object) -> TaskAction | AnswerAction | AssignAction | None:
+@dataclass(frozen=True)
+class ContextAction:
+    context_id: int
+    approve: bool
+
+
+def parse_callback(data: object) -> TaskAction | AnswerAction | AssignAction | ContextAction | None:
     if not isinstance(data, str):
         return None
     if match := _TASK_RE.fullmatch(data):
@@ -87,6 +97,8 @@ def parse_callback(data: object) -> TaskAction | AnswerAction | AssignAction | N
         return AnswerAction(int(match.group(1)), YES if match.group(2) == "s" else NO)
     if match := _ASSIGN_RE.fullmatch(data):
         return AssignAction(int(match.group(1)), match.group(2))
+    if match := _CONTEXT_RE.fullmatch(data):
+        return ContextAction(int(match.group(2)), match.group(1) == "a")
     return None
 
 
@@ -115,3 +127,11 @@ def question_buttons(question: Question) -> InlineKeyboardMarkup:
         ])
     rows.append([InlineKeyboardButton(_ACTION_LABELS["cancel"], callback_data=f"t:c:{question.task_id}")])
     return InlineKeyboardMarkup(rows)
+
+
+def context_buttons(context_id: int) -> InlineKeyboardMarkup:
+    """Aprobar / Rechazar un borrador de contexto propuesto por el cerebro."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✓ Aprobar", callback_data=f"cx:a:{context_id}"),
+        InlineKeyboardButton("✗ Rechazar", callback_data=f"cx:r:{context_id}"),
+    ]])

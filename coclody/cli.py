@@ -39,6 +39,14 @@ def main(argv: list[str] | None = None) -> int:
     proj_sub.add_parser("listar", help="lista los proyectos y cuál está activo")
     act = proj_sub.add_parser("activar", help="cambia el proyecto activo (crea los worktrees que falten)")
     act.add_argument("nombre")
+    for name, etiqueta in (("reglas", "reglas"), ("contexto", "contexto")):
+        kb = sub.add_parser(name, help=f"{etiqueta} del proyecto activo: listar, agregar, quitar")
+        kb_sub = kb.add_subparsers(dest="accion", required=True, metavar="{listar,agregar,quitar}")
+        kb_sub.add_parser("listar")
+        kadd = kb_sub.add_parser("agregar")
+        kadd.add_argument("texto", nargs="+", help="el texto de la entrada")
+        krm = kb_sub.add_parser("quitar")
+        krm.add_argument("id", type=int)
     args = parser.parse_args(argv)
     bare = args.command is None and argv is None and len(sys.argv) <= 1
 
@@ -62,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
             code = update(paths)
         elif command == "proyecto":
             code = project_command(paths, args)
+        elif command in ("reglas", "contexto"):
+            code = knowledge_command(paths, command, args)
         else:
             from coclody.main import run
 
@@ -242,6 +252,54 @@ def project_command(paths: AppPaths, args, out=print) -> int:
     for report in activation.reports:
         out(f"  {report.spec.name} ({report.spec.branch}): {'creado' if report.status == 'created' else 'bien'}")
     return 0
+
+
+def knowledge_command(paths: AppPaths, kind: str, args, out=print) -> int:
+    """``coclody reglas|contexto listar|agregar|quitar``. Opera sobre el proyecto activo."""
+    from coclody.db import connection_factory, knowledge, migrate
+    from coclody.db import projects as prepo
+    from coclody.db.repo import RepoError
+
+    try:
+        load_config(paths)
+    except ConfigError as exc:
+        out(str(exc))
+        return 2
+    paths.ensure()
+    with closing(connect(paths.db_file)) as conn:
+        migrate(conn)
+    db = connection_factory(paths.db_file)
+    with db() as conn:
+        project = prepo.active_project(conn)
+        if project is None:
+            out("No hay proyecto activo. Activá uno con `coclody proyecto activar <nombre>`.")
+            return 2
+        try:
+            if args.accion == "agregar":
+                text = " ".join(args.texto)
+                entry = (knowledge.add_rule(conn, project.id, text) if kind == "reglas"
+                         else knowledge.add_user_context(conn, project.id, text, 0))
+                out(f"[ok] Agregué {kind[:-1] if kind == 'reglas' else 'contexto'} #{entry.id} en {project.name}.")
+                return 0
+            if args.accion == "quitar":
+                done = (knowledge.delete_rule(conn, project.id, args.id) if kind == "reglas"
+                        else bool(knowledge.archive_context(conn, project.id, args.id)))
+                out(f"[ok] {'Borré' if kind == 'reglas' else 'Archivé'} #{args.id}." if done else f"No existe #{args.id}.")
+                return 0 if done else 2
+            if kind == "reglas":
+                rows = knowledge.list_rules(conn, project.id)
+                for r in rows:
+                    out(f"{'on ' if r.enabled else 'off'} #{r.id}  {r.text}")
+            else:
+                for c in knowledge.list_context(conn, project.id, statuses=("approved", "draft")):
+                    out(f"{c.status:8} #{c.id}  {c.text}")
+                rows = True
+            if not rows:
+                out(f"{project.name} no tiene {kind}.")
+            return 0
+        except RepoError as exc:
+            out(f"[ERROR] {exc}")
+            return 2
 
 
 def update(paths: AppPaths, out=print, updater_factory=None) -> int:

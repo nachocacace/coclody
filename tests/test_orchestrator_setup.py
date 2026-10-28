@@ -558,3 +558,133 @@ def test_menu_includes_project_commands_only_with_the_orchestrator():
 
 def test_git_found_for_tests():
     assert GIT is not None
+
+
+# --- reglas y contexto por Telegram y CLI (etapa 3) ------------------------------------------------------
+
+
+def active(services, db, git, ws):
+    """Crea y activa un proyecto 'web' para los tests de reglas/contexto."""
+    s = services()
+    project_ops.add(db, git, s.config, "web", make_repo(ws / "web"))
+    project_ops.activate(db, git, s.config, "web")
+    return s
+
+
+def test_rules_commands_need_the_orchestrator(services):
+    off = services("enabled = false\n")
+    assert "no está activado" in telegram(off, "/reglas")[0]
+    assert "no está activado" in telegram(off, "/contexto")[0]
+
+
+def test_telegram_rules_crud(services, db, git, ws, conn):
+    s = active(services, db, git, ws)
+    assert "no tiene reglas" in telegram(s, "/reglas")[0]
+    assert "Agregué la regla #1" in telegram(s, "/reglas agregar Usá pytest")[0]
+    (listing,) = telegram(s, "/reglas")
+    assert "🟢 #1 Usá pytest" in listing
+    assert "desactivada" in telegram(s, "/reglas off 1")[0]
+    assert "⚪ #1" in telegram(s, "/reglas")[0]
+    assert "Borré la regla #1" in telegram(s, "/reglas quitar 1")[0]
+    from coclody.db import knowledge
+    assert knowledge.list_rules(conn, prepo.active_project(conn).id) == []
+
+
+def test_telegram_user_context_is_approved_and_listed(services, db, git, ws, conn):
+    s = active(services, db, git, ws)
+    assert "Agregué el contexto #1 (aprobado)" in telegram(s, "/contexto agregar El deploy es manual")[0]
+    (listing,) = telegram(s, "/contexto")
+    assert "Aprobado:" in listing and "#1 El deploy es manual" in listing
+
+
+def test_telegram_shows_brain_drafts_with_buttons_and_approves(services, db, git, ws, conn):
+    from telegram import Update
+
+    from coclody.db import knowledge
+    from coclody.telegram_bot.app import build_application
+    from tests.fake_telegram import TOKEN, FakeTelegram, bot_message_with_buttons, callback_update, inline_data, user_text
+
+    s = active(services, db, git, ws)
+    pid = prepo.active_project(conn).id
+    draft = knowledge.propose_context(conn, pid, "Parece que usan Postgres")
+
+    fake = FakeTelegram()
+    app = build_application(TOKEN, s, request=fake, get_updates_request=FakeTelegram())
+
+    async def go():
+        await app.initialize()
+        await app.process_update(Update.de_json(user_text(111, "/contexto"), app.bot))
+        # El último mensaje es el borrador con botones Aprobar/Rechazar.
+        draft_msg = fake.sent()[-1]
+        assert inline_data(draft_msg) == [f"cx:a:{draft.id}", f"cx:r:{draft.id}"]
+        msg = bot_message_with_buttons(fake.returned_ids[-1], 111, draft_msg)
+        before = len(fake.sent())
+        await app.process_update(Update.de_json(callback_update(111, f"cx:a:{draft.id}", message=msg), app.bot))
+        await app.shutdown()
+        return [m["text"] for m in fake.sent()[before:]]
+
+    replies = asyncio.run(go())
+    assert any("aprobado" in t for t in replies)
+    assert "Postgres" in knowledge.approved_context_text(conn, pid)
+
+
+def test_telegram_reject_draft(services, db, git, ws, conn):
+    from telegram import Update
+
+    from coclody.db import knowledge
+    from coclody.telegram_bot.app import build_application
+    from tests.fake_telegram import TOKEN, FakeTelegram, bot_message, callback_update
+
+    s = active(services, db, git, ws)
+    pid = prepo.active_project(conn).id
+    draft = knowledge.propose_context(conn, pid, "dato dudoso")
+
+    fake = FakeTelegram()
+    app = build_application(TOKEN, s, request=fake, get_updates_request=FakeTelegram())
+
+    async def go():
+        await app.initialize()
+        msg = bot_message(500, 111, "Borrador")
+        await app.process_update(Update.de_json(callback_update(111, f"cx:r:{draft.id}", message=msg), app.bot))
+        await app.shutdown()
+        return [m["text"] for m in fake.sent()]
+
+    assert any("rechazado" in t for t in asyncio.run(go()))
+    assert knowledge.list_context(conn, pid, statuses=("rejected",))[0].id == draft.id
+
+
+def test_rules_menu_entries_only_with_orchestrator():
+    from telegram import Bot
+
+    from coclody.telegram_bot.app import setup_menu
+    from tests.fake_telegram import TOKEN, FakeTelegram
+
+    def commands(orchestrator):
+        fake = FakeTelegram()
+
+        async def go():
+            async with Bot(TOKEN, request=fake) as bot:
+                await setup_menu(bot, {111}, orchestrator)
+
+        asyncio.run(go())
+        return {c["command"] for c in fake.called("setMyCommands")[0]["commands"]}
+
+    assert not {"reglas", "contexto"} & commands(False)
+    assert {"reglas", "contexto"} <= commands(True)
+
+
+def test_cli_rules_and_context(services, db, git, ws, app_paths, conn):
+    active(services, db, git, ws)  # deja 'web' activo en la base
+    lines = []
+    assert cli.knowledge_command(app_paths, "reglas", argparse.Namespace(accion="agregar", texto=["Usá", "pytest"]),
+                                 out=lines.append) == 0
+    assert any("Agregué" in ln for ln in lines)
+    lines.clear()
+    cli.knowledge_command(app_paths, "reglas", argparse.Namespace(accion="listar"), out=lines.append)
+    assert any("on  #1  Usá pytest" in ln for ln in lines)
+    lines.clear()
+    assert cli.knowledge_command(app_paths, "contexto", argparse.Namespace(accion="agregar", texto=["deploy", "manual"]),
+                                 out=lines.append) == 0
+    lines.clear()
+    cli.knowledge_command(app_paths, "contexto", argparse.Namespace(accion="listar"), out=lines.append)
+    assert any("approved #1  deploy manual" in ln for ln in lines)

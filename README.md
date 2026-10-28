@@ -243,7 +243,7 @@ Estos son supuestos explícitos del diseño. Si alguno no se cumple en tu caso, 
 
 ## Orquestador (modo v2)
 
-> En construcción, por etapas. Hoy (etapa 2) están los proyectos, los worktrees y los workers en paralelo con sus commits; el cerebro, los resúmenes y la web llegan en las etapas siguientes. Con `[orquestador] enabled = false` (el default), CoClody funciona exactamente como antes.
+> En construcción, por etapas. Hoy (etapa 3) están los proyectos, los worktrees, los workers en paralelo con sus commits, y las reglas y el contexto por proyecto; el cerebro, los resúmenes y la web llegan en las etapas siguientes. Con `[orquestador] enabled = false` (el default), CoClody funciona exactamente como antes.
 
 Un **cerebro** (otra instancia de Claude Code que solo decide) coordina varios **workers** de Claude Code que trabajan en paralelo, cada uno en su propio worktree de git del **proyecto activo**.
 
@@ -269,6 +269,14 @@ Al activar un proyecto, CoClody crea los worktrees que falten, dentro de la carp
 
 Las ramas salen de la rama en la que esté la raíz al registrar el proyecto (la "rama base"). `.coclody/` se agrega a `.git/info/exclude` (local, no versionado). CoClody **nunca borra** un worktree: si bajás `workers`, el que sobra queda en disco y deja de usarse. El merge a tu rama principal lo hacés vos.
 
+### Reglas y contexto
+
+Cada proyecto tiene sus **reglas** (cómo querés que se resuelvan las cosas) y su **contexto** (qué conviene saber del proyecto). Son la base de conocimiento que, más adelante, recibirá el cerebro.
+
+- **Reglas** (`/reglas`, o `coclody reglas`): las escribís y editás solo vos. `/reglas agregar <texto>`, `/reglas on|off <id>` para activarlas o no, `/reglas quitar <id>`. El cerebro nunca las toca (garantizado por construcción: ninguna parte de su código puede escribirlas, y un test lo verifica).
+- **Contexto** (`/contexto`, o `coclody contexto`): lo que agregás vos entra aprobado. El cerebro solo podrá **proponer borradores**, que te llegan por Telegram con botones **✓ Aprobar / ✗ Rechazar** y no cuentan hasta que los aprobás. `/contexto agregar <texto>` agrega uno tuyo; `/contexto archivar <id>` saca de circulación uno aprobado (sin borrarlo).
+- Las reglas habilitadas y el contexto aprobado tienen un tope de tamaño (6000 y 10000 caracteres): si una entrada no entra, se rechaza al escribirla o aprobarla, con un mensaje claro, en vez de recortar en silencio.
+
 ### Cómo trabajan los workers
 
 - `/nueva w2 <título>` crea la tarea en el proyecto activo y la pone en la cola de w2. Con `/nueva <título>` (o el botón ➕) el bot te muestra un botón por worker para elegir. Repartir tareas es mecánico: no pasa por el cerebro ni gasta nada.
@@ -286,7 +294,7 @@ Las ramas salen de la rama en la que esté la raíz al registrar el proyecto (la
 | Un worker no sale de la raíz del proyecto | Los worktrees están dentro de la raíz, y la raíz dentro de `workspace_root` (verificado después de resolver symlinks; `.coclody` no puede ser un symlink) | Por construcción |
 | Un worker no toca el worktree de otro | Su carpeta de trabajo es su worktree y sus herramientas de archivos están acotadas a `./**` (el aislamiento de `./**` está verificado con Claude Code real solo en macOS); los worktrees son carpetas hermanas, nunca una dentro de otra | Por construcción |
 | Los workers no ejecutan git | git no puede estar en `worker_commands` (la config lo rechaza); los commits los hace CoClody | Por construcción, **salvo** lo de la fila siguiente |
-| Ni push, ni reset, ni rebase, ni borrar ramas o worktrees | Sin `worker_commands` (no hay Bash): por construcción, los workers solo leen y editan. Con comandos (tests, linters, build): esos comandos corren código del proyecto (un `conftest.py`, un script de `package.json`), que un worker puede escribir y ejecutar lo que sea. Por eso solo se permiten **con el sandbox de Claude Code** (macOS/Linux; en Windows la config los rechaza): el sandbox confina a Bash al worktree, sin leer el `.env` ni el home ni los otros worktrees, y sin red. CoClody además verifica las invariantes de git después de cada tarea y guarda ramas de respaldo. Verificado con Claude Code real en macOS. | Construcción sin comandos; con comandos, el sandbox contiene y git queda **por instrucción** |
+| Ni push, ni reset, ni rebase, ni borrar ramas o worktrees | Sin `worker_commands` (no hay Bash): por construcción, los workers solo leen y editan. Con comandos (tests, linters, build): esos comandos corren código del proyecto (un `conftest.py`, un script de `package.json`), que un worker puede escribir y ejecutar lo que sea. Por eso solo se permiten **con el sandbox de Claude Code** (macOS/Linux; en Windows la config los rechaza): el sandbox confina a Bash al worktree, sin leer el `.env` ni el home ni los otros worktrees, y sin red. CoClody además verifica las invariantes de git después de cada tarea y guarda ramas de respaldo. Verificado con Claude Code real en macOS, incluido el corte de red (un comando sandboxeado no logró conectarse ni a un listener local). | Construcción sin comandos; con comandos, el sandbox contiene y git queda **por instrucción** |
 | Un worker no escribe el `.git`, `.gitattributes` ni `.gitmodules` | Reglas de denegación (`--disallowedTools`) que ganan a lo preaprobado: en un worktree `.git` es un puntero que, editado, ejecutaría código en el próximo git. Verificado con Claude Code real. | Por construcción |
 | Sin secretos alcanzables desde un comando del worker | Con sandbox: el home queda denegado por defecto (SSH, llavero, datos de CoClody) y se reabre solo el worktree; la raíz del proyecto (con su `.env` y los worktrees vecinos) se deniega explícitamente; la red se corta. Sin comandos no hay forma de leer fuera del worktree. | Por construcción (con sandbox o sin comandos) |
 | El git de CoClody no ejecuta código del repo | Cada llamada lleva `core.hooksPath` a una carpeta vacía (si tiene algo, no se ejecuta git), `core.fsmonitor=false`, sin paginador, y no hereda variables `GIT_*` | Por construcción |
